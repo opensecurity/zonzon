@@ -74,10 +74,18 @@ const ControlPlaneSchema = z.object({
   apiKey: z.string().max(256).optional()
 });
 
+const TlsSchema = z.object({
+  cert: z.string().min(1),
+  key: z.string().min(1)
+});
+
 const ServerConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(53),
   httpPort: z.coerce.number().int().min(1).max(65535).optional(),
   httpsPort: z.coerce.number().int().min(1).max(65535).optional(),
+  tls: TlsSchema.optional(),
+  dotPort: z.coerce.number().int().min(1).max(65535).default(853).optional(),
+  dohPort: z.coerce.number().int().min(1).max(65535).default(8443).optional(),
   fallbackDns: Ipv4Schema.optional(),
   firewall: FirewallSchema.optional(),
   controlPlane: ControlPlaneSchema.optional(),

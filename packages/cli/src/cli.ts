@@ -242,6 +242,7 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
       apiKey: activeApiKey,
       blindIndexSalt: blindIndexSalt,
       initialConfig: config,
+      configFilePath: configPath
     });
 
     controlPlane.subscribe(async (newConfig: ServerConfig) => {
@@ -261,12 +262,25 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
 
   audit.system("Initialization complete. Awaiting connections...");
 
+  let shuttingDown = false;
   const shutdown = async () => {
-    audit.system("Initiating graceful shutdown sequence...");
+    if (shuttingDown) return;
+    shuttingDown = true;
+    
+    audit.system("SIGINT/SIGTERM received. Initiating graceful connection draining sequence (10s bounds)...");
+    
+    const forceExit = setTimeout(() => {
+      audit.error("Graceful drain timeout exceeded. Forcing engine termination.");
+      process.exit(1);
+    }, 10000);
+
     await daemon.stop();
     if (controlPlane) {
       await controlPlane.stop();
     }
+    
+    clearTimeout(forceExit);
+    audit.system("All boundaries offline. Process terminating cleanly.");
     process.exit(0);
   };
 

@@ -80,10 +80,18 @@ export interface ControlPlaneConfig {
   apiKey?: string;
 }
 
+export interface TlsConfig {
+  cert: string;
+  key: string;
+}
+
 export interface ServerConfig {
   port: number;
   httpPort?: number;
   httpsPort?: number;
+  tls?: TlsConfig;
+  dotPort?: number;
+  dohPort?: number;
   fallbackDns?: string;
   firewall?: FirewallConfig;
   controlPlane?: ControlPlaneConfig;

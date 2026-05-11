@@ -1,5 +1,8 @@
 import dgram, { RemoteInfo } from "dgram";
 import * as net from "net";
+import * as tls from "node:tls";
+import * as https from "node:https";
+import * as http from "node:http";
 import { DevDnsServer, DnsWireFormat, extractQuestions } from "./dns-service.js";
 import { ServerConfig, DNS_RCODE } from "./types.js";
 import { RateLimiter } from "./rate-limiter.js";
@@ -19,11 +22,14 @@ export class DnsHandler {
   private udpServer: dgram.Socket | null = null;
   private upstreamUdpSocket: dgram.Socket | null = null;
   private tcpServer: net.Server | null = null;
+  private dotServer: tls.Server | null = null;
+  private dohServer: https.Server | null = null;
+
   private port: number;
   private fallbackDns: string | undefined;
   private config: ServerConfig;
 
-  private activeTcpConnections = new Map<net.Socket, { timeoutId?: ReturnType<typeof setTimeout> }>();
+  private activeTcpConnections = new Map<net.Socket | tls.TLSSocket, { timeoutId?: ReturnType<typeof setTimeout> }>();
   private maxTcpConnections: number;
   private tcpIdleTimeoutMs: number;
 
@@ -54,6 +60,11 @@ export class DnsHandler {
   async start(): Promise<void> {
     await this.startUdp();
     await this.startTcp();
+    
+    if (this.config.tls) {
+      await this.startDoT();
+      await this.startDoH();
+    }
   }
 
   async stop(): Promise<void> {
@@ -80,6 +91,25 @@ export class DnsHandler {
       });
       this.tcpServer = null;
     }
+
+    if (this.dotServer) {
+      await new Promise<void>((resolve) => {
+        this.dotServer?.close(() => resolve());
+      });
+      this.dotServer = null;
+    }
+
+    if (this.dohServer) {
+      await new Promise<void>((resolve) => {
+        this.dohServer?.close(() => resolve());
+      });
+      this.dohServer = null;
+    }
+
+    for (const [socket] of this.activeTcpConnections) {
+      if (!socket.destroyed) socket.destroy();
+    }
+    this.activeTcpConnections.clear();
   }
 
   private startUdp(): Promise<void> {
@@ -163,19 +193,80 @@ export class DnsHandler {
         this.handleTcpConnection(socket);
       });
 
-      tcpServer.on("close", () => {
-        for (const [socket] of this.activeTcpConnections) {
-          if (!socket.destroyed) socket.destroy();
-        }
-        this.activeTcpConnections.clear();
-      });
-
       tcpServer.on("listening", () => {
         this.tcpServer = tcpServer;
         resolve();
       });
 
       tcpServer.listen(this.port, "0.0.0.0");
+    });
+  }
+
+  private startDoT(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.config.tls) {
+        resolve();
+        return;
+      }
+
+      const dotServer = tls.createServer({
+        cert: this.config.tls.cert,
+        key: this.config.tls.key,
+        minVersion: "TLSv1.2"
+      }, (socket: tls.TLSSocket) => {
+        if (this.activeTcpConnections.size >= this.maxTcpConnections) {
+          socket.destroy();
+          return;
+        }
+
+        this.activeTcpConnections.set(socket, { timeoutId: undefined });
+
+        socket.setTimeout(this.tcpIdleTimeoutMs);
+        socket.on("timeout", () => {
+          this.removeTcpConnection(socket);
+          socket.destroy();
+        });
+
+        this.handleTcpConnection(socket);
+      });
+
+      dotServer.on("listening", () => {
+        this.dotServer = dotServer;
+        audit.system(`DoT (DNS over TLS) isolated boundary listening on port ${this.config.dotPort || 853}`);
+        resolve();
+      });
+
+      dotServer.listen(this.config.dotPort || 853, "0.0.0.0");
+    });
+  }
+
+  private startDoH(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.config.tls) {
+        resolve();
+        return;
+      }
+
+      const dohServer = https.createServer({
+        cert: this.config.tls.cert,
+        key: this.config.tls.key,
+        minVersion: "TLSv1.2"
+      }, (req, res) => {
+        this.handleDohRequest(req, res).catch(() => {
+          if (!res.headersSent) {
+            res.writeHead(500);
+            res.end();
+          }
+        });
+      });
+
+      dohServer.on("listening", () => {
+        this.dohServer = dohServer;
+        audit.system(`DoH (DNS over HTTPS) isolated boundary listening on port ${this.config.dohPort || 8443}`);
+        resolve();
+      });
+
+      dohServer.listen(this.config.dohPort || 8443, "0.0.0.0");
     });
   }
 
@@ -224,6 +315,133 @@ export class DnsHandler {
     if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
     if (parts[0] === 192 && parts[1] === 168) return true;
     return false;
+  }
+
+  private resolveQueryAsync(query: Buffer, clientIp: string): Promise<Buffer> {
+    return new Promise((resolve) => {
+      const response = this.server.resolve(query, clientIp);
+      if (response) {
+        if (response.length > 0) resolve(response);
+        else resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
+        return;
+      }
+
+      if (!this.fallbackDns) {
+        resolve(this.server.generateErrorResponse(query, DNS_RCODE.NXDOMAIN));
+        return;
+      }
+
+      const fwdSocket = dgram.createSocket("udp4");
+      const timeoutId = setTimeout(() => {
+        try { fwdSocket.close(); } catch {}
+        resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
+      }, 3000);
+
+      fwdSocket.on("message", (msg) => {
+        clearTimeout(timeoutId);
+        try { fwdSocket.close(); } catch {}
+        
+        const ips = this.parseResolvedIpv4s(msg);
+        let blockedIp = null;
+        for (const ip of ips) {
+          if (firewallEngine.evaluateIp(ip, this.config.firewall) === "DENY") {
+            blockedIp = ip;
+            break;
+          }
+        }
+
+        if (blockedIp) {
+          resolve(this.server.generateErrorResponse(query, DNS_RCODE.REFUSED));
+        } else {
+          resolve(msg);
+        }
+      });
+
+      fwdSocket.on("error", () => {
+        clearTimeout(timeoutId);
+        try { fwdSocket.close(); } catch {}
+        resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
+      });
+
+      fwdSocket.send(query, 0, query.length, 53, this.fallbackDns);
+    });
+  }
+
+  private async handleDohRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const clientIp = req.socket.remoteAddress || "unknown";
+    if (this.isRateLimited(clientIp)) {
+      res.writeHead(429);
+      res.end();
+      return;
+    }
+
+    const method = req.method || "GET";
+    const url = new URL(req.url || "/", `https://${req.headers.host || "localhost"}`);
+
+    if (url.pathname !== "/dns-query") {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+
+    let query: Buffer | null = null;
+
+    if (method === "GET") {
+      const dnsParam = url.searchParams.get("dns");
+      if (!dnsParam) {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
+      try {
+        query = Buffer.from(dnsParam, "base64url");
+      } catch {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
+    } else if (method === "POST") {
+      if (req.headers["content-type"] !== "application/dns-message") {
+        res.writeHead(415);
+        res.end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of req) {
+        total += chunk.length;
+        if (total > MAX_TCP_BUFFER_SIZE) {
+          res.writeHead(413);
+          res.end();
+          return;
+        }
+        chunks.push(chunk);
+      }
+      query = Buffer.concat(chunks);
+    } else {
+      res.writeHead(405);
+      res.end();
+      return;
+    }
+
+    if (!query || query.length < 12) {
+      res.writeHead(400);
+      res.end();
+      return;
+    }
+
+    try {
+      const response = await this.resolveQueryAsync(query, clientIp);
+      res.writeHead(200, {
+        "Content-Type": "application/dns-message",
+        "Content-Length": response.length,
+        "Cache-Control": "max-age=0"
+      });
+      res.end(response);
+    } catch {
+      res.writeHead(502);
+      res.end();
+    }
   }
 
   private forwardUdpQuery(data: Buffer, clientInfo: RemoteInfo): void {
@@ -296,13 +514,13 @@ export class DnsHandler {
     }
   }
 
-  private removeTcpConnection(socket: net.Socket): void {
+  private removeTcpConnection(socket: net.Socket | tls.TLSSocket): void {
     const entry = this.activeTcpConnections.get(socket);
     if (entry?.timeoutId) clearTimeout(entry.timeoutId);
     this.activeTcpConnections.delete(socket);
   }
 
-  private forwardTcpQuery(query: Buffer, clientSocket: net.Socket, peerAddr: string): void {
+  private forwardTcpQuery(query: Buffer, clientSocket: net.Socket | tls.TLSSocket, peerAddr: string): void {
     if (!this.fallbackDns) return;
 
     const fwd = net.createConnection(53, this.fallbackDns, () => {
@@ -361,7 +579,7 @@ export class DnsHandler {
     });
   }
 
-  private handleTcpConnection(socket: net.Socket): void {
+  private handleTcpConnection(socket: net.Socket | tls.TLSSocket): void {
     let buffer = Buffer.alloc(0);
     const peerAddr = socket.remoteAddress || "unknown";
 
