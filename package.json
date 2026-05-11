@@ -36,7 +36,7 @@
     "dev": "npm run dev --workspace=@opensecurity/zonzon-cli",
     "docker:up": "docker compose up",
     "docker:build": "docker build -t zonzon .",
-    "clean": "rm -rf packages/*/dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo tsconfig.tsbuildinfo"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
