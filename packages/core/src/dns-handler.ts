@@ -20,6 +20,9 @@ export class DnsHandler {
   private maxTcpConnections: number;
   private tcpIdleTimeoutMs: number;
 
+  private activeUdpForwards = 0;
+  private readonly maxConcurrentUdpForwards = 2000;
+
   private rateLimiter: RateLimiter | null;
 
   constructor(server: DevDnsServer, config: ServerConfig) {
@@ -155,21 +158,33 @@ export class DnsHandler {
   private forwardUdpQuery(data: Buffer, clientInfo: RemoteInfo): void {
     if (!this.fallbackDns || !this.udpServer) return;
 
+    if (this.activeUdpForwards >= this.maxConcurrentUdpForwards) {
+      audit.system("Dropped UDP forward request: Concurrent connection limit reached");
+      return;
+    }
+
+    this.activeUdpForwards++;
     const fwdSocket = dgram.createSocket("udp4");
     let handled = false;
 
-    const timeout = setTimeout(() => {
+    const cleanup = () => {
       if (!handled) {
         handled = true;
-        fwdSocket.close();
+        this.activeUdpForwards--;
+        try { fwdSocket.close(); } catch {}
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      if (!handled) {
         const ref = this.server.generateErrorResponse(data, DNS_RCODE.SERVFAIL);
         this.udpServer?.send(ref, 0, ref.length, clientInfo.port, clientInfo.address);
+        cleanup();
       }
     }, 3000);
 
     fwdSocket.on("message", (resp) => {
       if (!handled) {
-        handled = true;
         clearTimeout(timeout);
         
         const ips = this.parseResolvedIpv4s(resp);
@@ -188,21 +203,25 @@ export class DnsHandler {
         } else {
           this.udpServer?.send(resp, 0, resp.length, clientInfo.port, clientInfo.address);
         }
-        fwdSocket.close();
+        cleanup();
       }
     });
 
     fwdSocket.on("error", (err) => {
       if (!handled) {
-        handled = true;
         clearTimeout(timeout);
-        fwdSocket.close();
         const ref = this.server.generateErrorResponse(data, DNS_RCODE.SERVFAIL);
         this.udpServer?.send(ref, 0, ref.length, clientInfo.port, clientInfo.address);
+        cleanup();
       }
     });
 
-    fwdSocket.send(data, 0, data.length, 53, this.fallbackDns);
+    fwdSocket.send(data, 0, data.length, 53, this.fallbackDns, (err) => {
+      if (err && !handled) {
+         clearTimeout(timeout);
+         cleanup();
+      }
+    });
   }
 
   private handleUdpMessage(data: Buffer, rinfo: RemoteInfo): void {

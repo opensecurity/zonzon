@@ -314,7 +314,6 @@ interface CacheEntry {
 export class DevDnsServer {
   private config: ServerConfig;
   private cacheMap = new Map<string, CacheEntry>();
-  private cacheOrder: string[] = []; 
   private dnsCacheMaxSize: number;
   private dnsCacheTtlMs: number;
 
@@ -356,9 +355,10 @@ export class DevDnsServer {
   }
 
   private evictCacheEntry(): void {
-    if (this.cacheOrder.length === 0) return;
-    const oldestKey = this.cacheOrder.shift()!;
-    this.cacheMap.delete(oldestKey);
+    const oldestKey = this.cacheMap.keys().next().value;
+    if (oldestKey !== undefined) {
+      this.cacheMap.delete(oldestKey);
+    }
   }
 
   private getFromCache(key: string): CacheEntry | null {
@@ -367,14 +367,11 @@ export class DevDnsServer {
 
     if (this.dnsCacheTtlMs > 0 && Date.now() - entry.insertedAt >= this.dnsCacheTtlMs) {
       this.cacheMap.delete(key);
-      const idx = this.cacheOrder.indexOf(key);
-      if (idx >= 0) this.cacheOrder.splice(idx, 1);
       return null;
     }
 
-    const idx = this.cacheOrder.indexOf(key);
-    if (idx >= 0) this.cacheOrder.splice(idx, 1);
-    this.cacheOrder.push(key);
+    this.cacheMap.delete(key);
+    this.cacheMap.set(key, entry);
 
     const remainingTtlMs = Math.max(0, this.dnsCacheTtlMs - (Date.now() - entry.insertedAt));
     entry.ttlMs = remainingTtlMs;
@@ -385,7 +382,7 @@ export class DevDnsServer {
   private addToCache(key: string, response: Buffer): void {
     if (this.dnsCacheTtlMs <= 0) return; 
 
-    while (this.cacheOrder.length >= this.dnsCacheMaxSize) {
+    while (this.cacheMap.size >= this.dnsCacheMaxSize) {
       this.evictCacheEntry();
     }
 
@@ -398,10 +395,8 @@ export class DevDnsServer {
       ttlMs: this.dnsCacheTtlMs,
     };
 
+    this.cacheMap.delete(key);
     this.cacheMap.set(key, entry);
-    const idx = this.cacheOrder.indexOf(key);
-    if (idx >= 0) this.cacheOrder.splice(idx, 1);
-    this.cacheOrder.push(key);
   }
 
   private skipQuestionSection(buffer: Buffer, offset: number): number {

@@ -4,6 +4,7 @@ import { audit } from "@opensecurity/zonzon-core";
 import { ConfigService } from "./config.service.js";
 import { ApiAuthHeaderSchema } from "./config.schema.js";
 import { ConfigContext } from "./config.types.js";
+import { contextStorage } from "./context.js";
 
 export class ConfigHandler {
   private service: ConfigService;
@@ -99,26 +100,28 @@ export class ConfigHandler {
       const isMutation = method === "PUT" || method === "POST";
       const context = this.extractContext(req, isMutation);
 
-      if (method === "GET") {
-        const config = await this.service.getConfig(context);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(config));
-        audit.http(clientIp, "GET", "control-plane", url.pathname, 200, "Config retrieved");
-        return;
-      }
+      await contextStorage.run(context, async () => {
+        if (method === "GET") {
+          const config = await this.service.getConfig();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(config));
+          audit.http(clientIp, "GET", "control-plane", url.pathname, 200, "Config retrieved");
+          return;
+        }
 
-      if (method === "PUT") {
-        const bodyStr = await this.readBodyStrict(req);
-        const rawConfig = JSON.parse(bodyStr);
-        await this.service.updateConfig(context, rawConfig);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: true, timestamp: Date.now() }));
-        audit.http(clientIp, "PUT", "control-plane", url.pathname, 200, "Config updated");
-        return;
-      }
+        if (method === "PUT") {
+          const bodyStr = await this.readBodyStrict(req);
+          const rawConfig = JSON.parse(bodyStr);
+          await this.service.updateConfig(rawConfig);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, timestamp: Date.now() }));
+          audit.http(clientIp, "PUT", "control-plane", url.pathname, 200, "Config updated");
+          return;
+        }
 
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Method Not Allowed" }));
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method Not Allowed" }));
+      });
 
     } catch (error: any) {
       const message = error.message || "Internal Server Error";

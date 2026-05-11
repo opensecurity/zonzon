@@ -4,13 +4,7 @@ import { HostConfig, ProxiedRequest, ModifiedHeaders, FirewallConfig } from "./t
 import { firewallEngine } from "./firewall.js";
 
 export class HttpProxyService {
-  private isRestrictedCloudMetadata(ip: string): boolean {
-    if (!net.isIPv4(ip)) return false;
-    const parts = ip.split('.').map(Number);
-    return (parts[0] === 169 && parts[1] === 254) || parts[0] === 0;
-  }
-
-  async validateTargetFirewall(targetUrl: string, fw?: FirewallConfig): Promise<void> {
+  async validateTargetFirewall(targetUrl: string, fw?: FirewallConfig): Promise<string[]> {
     const parsed = new URL(targetUrl);
     const host = parsed.hostname;
     const isLiteralIp = net.isIP(host) !== 0;
@@ -34,8 +28,12 @@ export class HttpProxyService {
       }
     }
 
+    if (targetIps.length === 0) {
+      throw new Error(`NXDOMAIN: '${host}'`);
+    }
+
     for (const ip of targetIps) {
-      if (this.isRestrictedCloudMetadata(ip)) {
+      if (firewallEngine.evaluateOutbound(ip, fw) === "DENY") {
         throw new Error(`Restricted IP: (${ip})`);
       }
       
@@ -44,8 +42,9 @@ export class HttpProxyService {
           throw new Error(`IP Blocked: ${ip}`);
         }
       }
-      
     }
+
+    return targetIps;
   }
 
   getUpstreamHeaders(config: HostConfig, originalRequest: ProxiedRequest): ModifiedHeaders {

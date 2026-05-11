@@ -62,12 +62,14 @@ export class HttpHandler {
   private server: http.Server | null = null;
   private circuitBreakers = new Map<string, ProxyCircuitBreaker>();
   private activeConnections = new Set<net.Socket>();
+  private idleTimeoutMs: number;
 
   constructor(dnsServer: DevDnsServer, config: ServerConfig, port?: number) {
     this.dnsServer = dnsServer;
     this.proxyService = new HttpProxyService();
     this.config = config;
     this.port = config.httpPort ?? port ?? 80;
+    this.idleTimeoutMs = config.tcpIdleTimeoutMs ?? 30000;
   }
 
   private getCircuitBreaker(upstream: string): ProxyCircuitBreaker {
@@ -115,6 +117,12 @@ export class HttpHandler {
 
       audit.http(clientIp, "CONNECT", hostname, `:${port}`, 200, "TCP Tunnel Established");
 
+      clientSocket.setTimeout(this.idleTimeoutMs);
+      clientSocket.on("timeout", () => {
+        audit.error(`CONNECT Client tunnel idle timeout reached for ${clientIp}`);
+        clientSocket.destroy();
+      });
+
       const srvSocket = net.connect(port, hostname, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head && head.length > 0) {
@@ -122,6 +130,12 @@ export class HttpHandler {
         }
         srvSocket.pipe(clientSocket);
         clientSocket.pipe(srvSocket);
+      });
+
+      srvSocket.setTimeout(this.idleTimeoutMs);
+      srvSocket.on("timeout", () => {
+        audit.error(`CONNECT Upstream tunnel idle timeout reached for ${hostname}:${port}`);
+        srvSocket.destroy();
       });
 
       this.activeConnections.add(srvSocket);
@@ -152,15 +166,19 @@ export class HttpHandler {
 
     const targetUrl = new URL(reqUrl);
     const hostname = targetUrl.hostname;
+    let validatedIps: string[] = [];
 
     try {
-      await this.proxyService.validateTargetFirewall(targetUrl.toString(), this.config.firewall);
+      validatedIps = await this.proxyService.validateTargetFirewall(targetUrl.toString(), this.config.firewall);
     } catch (fwErr: any) {
       audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 403, "Blocked by L3/L7 Firewall");
       res.writeHead(403, { "Content-Type": "text/html" });
       res.end(`<h1>403 Forbidden</h1><p>${fwErr.message}</p>`);
       return;
     }
+
+    const targetIp = validatedIps[0];
+    targetUrl.hostname = targetIp;
 
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
@@ -170,6 +188,8 @@ export class HttpHandler {
         headers.set(k, v);
       }
     }
+    
+    headers.set("Host", hostname);
 
     const hopByHop = this.proxyService.getHopByHopHeaders();
     for (const h of hopByHop) {
@@ -200,6 +220,7 @@ export class HttpHandler {
     const proxiedReqInit: RequestInit = {
       method: reqMethod,
       headers,
+      signal: AbortSignal.timeout(this.idleTimeoutMs)
     };
 
     if (bodyBuffer) {
@@ -208,7 +229,7 @@ export class HttpHandler {
     }
 
     const proxiedReq = new Request(targetUrl.toString(), proxiedReqInit);
-    const breaker = this.getCircuitBreaker(targetUrl.hostname);
+    const breaker = this.getCircuitBreaker(hostname);
 
     try {
       const proxyResp = await breaker.execute(() => fetch(proxiedReq));
@@ -225,7 +246,14 @@ export class HttpHandler {
       const responseBuffer = Buffer.from(await proxyResp.arrayBuffer());
       res.end(responseBuffer);
     } catch (err: any) {
-      audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 502, "Upstream Timeout or Fault");
+      if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+        audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 504, "Upstream Gateway Timeout");
+        res.writeHead(504, { "Content-Type": "text/html" });
+        res.end(`<h1>504 Gateway Timeout</h1>`);
+        return;
+      }
+
+      audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 502, "Upstream Offline or Fault");
       res.writeHead(502, { "Content-Type": "text/html" });
       res.end(`<h1>502 Bad Gateway</h1>`);
     }
@@ -277,9 +305,10 @@ export class HttpHandler {
 
         if (hostConfig.http_proxy?.enabled && hostConfig.http_proxy.upstream) {
           const upstreamBase = new URL(hostConfig.http_proxy.upstream);
+          let validatedIps: string[] = [];
 
           try {
-            await this.proxyService.validateTargetFirewall(upstreamBase.toString(), this.config.firewall);
+            validatedIps = await this.proxyService.validateTargetFirewall(upstreamBase.toString(), this.config.firewall);
           } catch (fwErr: any) {
             audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by L3 Firewall");
             res.writeHead(403, { "Content-Type": "text/html" });
@@ -287,7 +316,9 @@ export class HttpHandler {
             return;
           }
 
+          const targetIp = validatedIps[0];
           let safePath = "/";
+          
           try {
             const parsedPath = new URL(reqUrl, "http://safe.local");
             safePath = parsedPath.pathname + parsedPath.search;
@@ -296,6 +327,9 @@ export class HttpHandler {
           }
 
           const targetUrl = new URL(safePath, upstreamBase);
+          const originalHostname = targetUrl.hostname;
+          targetUrl.hostname = targetIp;
+
           const headers = new Headers();
 
           for (const [k, v] of Object.entries(req.headers)) {
@@ -305,6 +339,8 @@ export class HttpHandler {
               headers.set(k, v);
             }
           }
+          
+          headers.set("Host", originalHostname);
 
           const shouldForwardBody = hostConfig.http_proxy.forwardRequestBody;
           const maxBodyBytes = hostConfig.http_proxy.maxRequestBodyBytes ?? 5 * 1024 * 1024;
@@ -331,6 +367,7 @@ export class HttpHandler {
           const proxiedReqInit: RequestInit = {
             method: reqMethod,
             headers,
+            signal: AbortSignal.timeout(this.idleTimeoutMs)
           };
 
           if (shouldForwardBody && bodyBuffer) {
@@ -339,7 +376,7 @@ export class HttpHandler {
           }
 
           const proxiedReq = new Request(targetUrl.toString(), proxiedReqInit);
-          const breaker = this.getCircuitBreaker(upstreamBase.hostname);
+          const breaker = this.getCircuitBreaker(originalHostname);
 
           const proxyResp = await breaker.execute(() => fetch(proxiedReq));
           const responseHeaders = new Headers(proxyResp.headers);
@@ -379,15 +416,28 @@ export class HttpHandler {
          return;
       }
 
-      const targetUrl = new URL(reqUrl, `http://${hostname}`);
+      if (firewallEngine.evaluateOutbound(targetIp, this.config.firewall) === "DENY") {
+        audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by SSRF Policy");
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+      }
+
+      const targetUrl = new URL(reqUrl, `http://${targetIp}`);
       const headers = new Headers();
 
       for (const [k, v] of Object.entries(req.headers)) {
         if (Array.isArray(v)) headers.set(k, v.join(", "));
         else if (typeof v === "string") headers.set(k, v);
       }
+      
+      headers.set("Host", hostname);
 
-      const proxiedReqInit: RequestInit = { method: reqMethod, headers };
+      const proxiedReqInit: RequestInit = { 
+        method: reqMethod, 
+        headers,
+        signal: AbortSignal.timeout(this.idleTimeoutMs)
+      };
       
       if (reqMethod !== "GET" && reqMethod !== "HEAD") {
         const chunks: Buffer[] = [];
@@ -399,7 +449,7 @@ export class HttpHandler {
       }
 
       const proxiedReq = new Request(targetUrl.toString(), proxiedReqInit);
-      const breaker = this.getCircuitBreaker(targetUrl.hostname);
+      const breaker = this.getCircuitBreaker(hostname);
       const proxyResp = await breaker.execute(() => fetch(proxiedReq));
       
       const outHeaders: Record<string, string> = {};
@@ -409,18 +459,25 @@ export class HttpHandler {
       res.writeHead(proxyResp.status, outHeaders);
       res.end(Buffer.from(await proxyResp.arrayBuffer()));
 
-    } catch (err) {
+    } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       audit.error(`HTTP request failed: ${message}`);
 
-      if (message.includes("Security Block") || message.includes("Firewall") || message.includes("Blocked")) {
+      if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+        audit.http(clientIp, reqMethod, hostname, reqUrl, 504, "Upstream Gateway Timeout");
+        res.writeHead(504, { "Content-Type": "text/html" });
+        res.end(`<h1>504 Gateway Timeout</h1>`);
+        return;
+      }
+
+      if (message.includes("Security Block") || message.includes("Firewall") || message.includes("Blocked") || message.includes("Restricted IP")) {
         audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked for Security (SSRF/Firewall)");
         res.writeHead(403, { "Content-Type": "text/html" });
         res.end(`<h1>403 Forbidden</h1>`);
         return;
       }
       
-      audit.http(clientIp, reqMethod, hostname, reqUrl, 502, "Upstream Offline/Timeout");
+      audit.http(clientIp, reqMethod, hostname, reqUrl, 502, "Upstream Offline/Fault");
       res.writeHead(502, { "Content-Type": "text/html" });
       res.end(`<h1>502 Bad Gateway</h1>`);
       return;
@@ -438,6 +495,10 @@ export class HttpHandler {
           }
         });
       });
+
+      this.server.headersTimeout = 10000;
+      this.server.requestTimeout = this.idleTimeoutMs;
+      this.server.keepAliveTimeout = 5000;
 
       this.server.on("connect", (req: IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
         this.handleConnect(req, clientSocket, head).catch((err) => {

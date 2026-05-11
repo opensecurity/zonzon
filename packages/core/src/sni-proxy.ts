@@ -4,15 +4,19 @@ import { ServerConfig } from "./types.js";
 import { firewallEngine } from "./firewall.js";
 import { audit } from "./audit.js";
 
+const MAX_CLIENT_HELLO_SIZE = 16384; 
+
 export class SniProxyService {
   private port: number;
   private config: ServerConfig;
   private server: net.Server | null = null;
   private activeConnections = new Set<net.Socket>();
+  private idleTimeoutMs: number;
 
   constructor(config: ServerConfig, port?: number) {
     this.config = config;
     this.port = config.httpsPort ?? port ?? 443;
+    this.idleTimeoutMs = config.tcpIdleTimeoutMs ?? 30000;
   }
 
   private extractSNI(data: Buffer): string | null {
@@ -70,8 +74,20 @@ export class SniProxyService {
     let buffer = Buffer.alloc(0);
     let isHandled = false;
 
+    clientSocket.setTimeout(this.idleTimeoutMs);
+    clientSocket.on("timeout", () => {
+      audit.error(`SNI Client tunnel idle timeout reached for ${clientIp}`);
+      clientSocket.destroy();
+    });
+
     clientSocket.on("data", async (chunk: Buffer) => {
       if (isHandled) return;
+
+      if (buffer.length + chunk.length > MAX_CLIENT_HELLO_SIZE) {
+        audit.http(clientIp, "TLS", "UNKNOWN", `:${this.port}`, 413, "Dropped: ClientHello exceeded maximum permitted size");
+        clientSocket.destroy();
+        return;
+      }
 
       buffer = Buffer.concat([buffer, chunk]);
 
@@ -101,8 +117,13 @@ export class SniProxyService {
         }
 
         const targetIp = targetIps[0];
+        
         if (firewallEngine.evaluateIp(targetIp, this.config.firewall) === "DENY") {
           throw new Error(`Target IP ${targetIp} blocked by Firewall policy`);
+        }
+
+        if (firewallEngine.evaluateOutbound(targetIp, this.config.firewall) === "DENY") {
+          throw new Error(`Target IP ${targetIp} blocked by SSRF policy`);
         }
 
         audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 200, `Tunneled to ${targetIp}`);
@@ -111,6 +132,12 @@ export class SniProxyService {
           srvSocket.write(buffer);
           clientSocket.pipe(srvSocket);
           srvSocket.pipe(clientSocket);
+        });
+
+        srvSocket.setTimeout(this.idleTimeoutMs);
+        srvSocket.on("timeout", () => {
+          audit.error(`SNI Upstream tunnel idle timeout reached for ${sni}:${targetIp}`);
+          srvSocket.destroy();
         });
 
         this.activeConnections.add(srvSocket);

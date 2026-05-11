@@ -1,5 +1,5 @@
 import { ServerConfig, validateServerConfig, audit } from "@opensecurity/zonzon-core";
-import { ConfigContext } from "./config.types.js";
+import { getContext } from "./context.js";
 
 class PessimisticLock {
   private locked = false;
@@ -36,14 +36,16 @@ export class ConfigService {
     this.subscribers.push(callback);
   }
 
-  public async getConfig(ctx: ConfigContext): Promise<ServerConfig> {
+  public async getConfig(): Promise<ServerConfig> {
+    const ctx = getContext();
     if (!ctx.tenantId) {
       throw new Error("Security Exception: Missing Tenant Context");
     }
     return this.config;
   }
 
-  public async updateConfig(ctx: ConfigContext, rawConfig: unknown): Promise<void> {
+  public async updateConfig(rawConfig: unknown): Promise<void> {
+    const ctx = getContext();
     if (!ctx.tenantId) {
       throw new Error("Security Exception: Missing Tenant Context");
     }

@@ -2,10 +2,10 @@ import { z } from "zod";
 import * as net from "net";
 import { HostConfig, DnsRecord, ServerConfig } from "./types.js";
 
-const CrlfFreeString = z.string().refine((val) => !/[\r\n]/.test(val), "Contains CR/LF");
+const CrlfFreeString = z.string().max(8192).refine((val) => !/[\r\n]/.test(val), "Contains CR/LF");
 
-const Ipv4Schema = z.string().refine((ip) => net.isIPv4(ip), "Invalid IPv4");
-const Ipv6Schema = z.string().refine((ip) => net.isIPv6(ip), "Invalid IPv6");
+const Ipv4Schema = z.string().max(45).refine((ip) => net.isIPv4(ip), "Invalid IPv4");
+const Ipv6Schema = z.string().max(45).refine((ip) => net.isIPv6(ip), "Invalid IPv6");
 
 const HostnameSchema = z.string().max(253).refine((hostname) => {
   const parts = hostname.split(".");
@@ -38,7 +38,7 @@ const DnsRecordSchema = z.discriminatedUnion("type", [
 const HttpProxySchema = z.object({
   enabled: z.boolean(),
   upstream: CrlfFreeString.optional(),
-  headers: z.record(z.string().regex(/^[a-zA-Z0-9\-]+$/), CrlfFreeString).default({}),
+  headers: z.record(z.string().max(256).regex(/^[a-zA-Z0-9\-]+$/), CrlfFreeString).default({}),
   forwardRequestBody: z.boolean().default(false),
   maxRequestBodyBytes: z.number().int().min(0).max(10485760).default(5242880),
 }).refine(data => !data.enabled || !!data.upstream, {
@@ -71,7 +71,7 @@ const FirewallSchema = z.object({
 const ControlPlaneSchema = z.object({
   enabled: z.boolean().default(true).optional(),
   port: z.coerce.number().int().min(1).max(65535).default(8080).optional(),
-  apiKey: z.string().optional()
+  apiKey: z.string().max(256).optional()
 });
 
 const ServerConfigSchema = z.object({
@@ -87,7 +87,7 @@ const ServerConfigSchema = z.object({
   tcpIdleTimeoutMs: z.coerce.number().int().min(1000).max(600000).default(30000),
   rateLimitMaxRequests: z.coerce.number().int().min(0).max(100000).default(0),
   rateLimitWindowMs: z.coerce.number().int().min(100).max(60000).default(1000),
-  hosts: z.record(z.string(), HostConfigSchema).default({}),
+  hosts: z.record(z.string().max(253), HostConfigSchema).default({}),
 }).refine(data => {
   for (const key of Object.keys(data.hosts)) {
     const normalized = key.toLowerCase();

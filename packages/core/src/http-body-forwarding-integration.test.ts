@@ -148,6 +148,9 @@ describe("HTTP Body Forwarding Integration", () => {
     try {
       const config: any = {
         port: 53,
+        firewall: {
+          allowlist_ips: ["127.0.0.1"]
+        },
         hosts: {
           "app.loop": {
             records: [{ type: "A", address: "127.0.0.1" }],
@@ -192,6 +195,9 @@ describe("HTTP Body Forwarding Integration", () => {
     try {
       const config: any = {
         port: 53,
+        firewall: {
+          allowlist_ips: ["127.0.0.1"]
+        },
         hosts: {
           "app.loop": {
             records: [{ type: "A", address: "127.0.0.1" }],
@@ -236,6 +242,9 @@ describe("HTTP Body Forwarding Integration", () => {
     try {
       const config: any = {
         port: 53,
+        firewall: {
+          allowlist_ips: ["127.0.0.1"]
+        },
         hosts: {
           "app.loop": {
             records: [{ type: "A", address: "127.0.0.1" }],
@@ -278,6 +287,9 @@ describe("HTTP Body Forwarding Integration", () => {
     try {
       const config: any = {
         port: 53,
+        firewall: {
+          allowlist_ips: ["127.0.0.1"]
+        },
         hosts: {
           "app.loop": {
             records: [{ type: "A", address: "127.0.0.1" }],
@@ -322,6 +334,9 @@ describe("HTTP Body Forwarding Integration", () => {
     try {
       const config: any = {
         port: 53,
+        firewall: {
+          allowlist_ips: ["127.0.0.1"]
+        },
         hosts: {
           "app.loop": {
             records: [{ type: "A", address: "127.0.0.1" }],

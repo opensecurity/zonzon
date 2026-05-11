@@ -10,9 +10,32 @@ interface IpBucket {
 export class RateLimiter {
   private options: RateLimiterOptions;
   private buckets = new Map<string, IpBucket>();
+  private gcInterval: NodeJS.Timeout;
 
   constructor(options: RateLimiterOptions) {
     this.options = options;
+    
+    this.gcInterval = setInterval(() => this.garbageCollect(), Math.max(options.windowMs * 2, 60000));
+    this.gcInterval.unref();
+  }
+
+  private garbageCollect(): void {
+    const now = Date.now();
+    const windowStart = now - this.options.windowMs;
+
+    for (const [ip, bucket] of this.buckets.entries()) {
+      const validTimestamps = bucket.timestamps.filter((t) => t >= windowStart);
+      if (validTimestamps.length === 0) {
+        this.buckets.delete(ip);
+      } else {
+        bucket.timestamps = validTimestamps;
+      }
+    }
+  }
+
+  public destroy(): void {
+    clearInterval(this.gcInterval);
+    this.buckets.clear();
   }
 
   allow(ip: string): boolean {
