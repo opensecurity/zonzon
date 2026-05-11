@@ -1,4 +1,4 @@
-# @opensecurity/zonzon-mono
+# zonzon
 
 This repository contains the source code for the zonzon zero-trust dns and http proxy infrastructure. It provides dns resolution, http forwarding, sni proxying, and a control plane for dynamic configuration.
 
