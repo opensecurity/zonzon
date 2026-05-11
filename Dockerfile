@@ -28,4 +28,4 @@ RUN addgroup -S zonzon && adduser -S zonzon -G zonzon
 USER zonzon
 
 ENTRYPOINT ["node", "packages/cli/dist/cli.js"]
-CMD ["--config", "/app/config/hosts.yaml", "--port", "53"]
+CMD ["--config", "/app/config/hosts.json", "--port", "53"]

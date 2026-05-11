@@ -12,7 +12,7 @@ services:
       - ZONZON_FIREWALL_ALLOWLIST_IPS=127.0.0.1,172.20.0.1
       - ZONZON_FIREWALL_ALLOWLIST_DOMAINS=github.com,ubuntu.com
     restart: unless-stopped
-    command: ["--config", "/app/config/hosts.yaml"]
+    command: ["--config", "/app/config/hosts.json"]
     networks:
       sandbox_net:
         ipv4_address: 172.20.0.53
