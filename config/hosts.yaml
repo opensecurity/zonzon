@@ -1,0 +1,49 @@
+port: 53
+fallbackDns: "1.1.1.1"
+
+firewall:
+  defaultPolicy: "deny"
+  
+  allowlist_domains:
+    - "*.ubuntu.com"
+    - "ubuntu.com"
+    - "*.github.com"
+    - "github.com"
+    - "*.githubusercontent.com"
+
+  allowlist_ips:
+    - "127.0.0.1"
+
+  blocklist_ips:
+    - "169.254.169.254"
+
+  allowlist_ranges:
+    - "0.0.0.0/0"
+    - "127.0.0.0/8"
+
+  blocklist_ranges:
+    - "0.0.0.0/8"
+
+hosts:
+  "*":
+    records:
+      - type: A
+        address: "172.20.0.53"
+
+  mock.openai.loop:
+    records:
+      - type: A
+        address: "127.0.0.1"
+    http_proxy:
+      enabled: true
+      upstream: "http://127.0.0.1:3000"
+      headers:
+        X-Environment: "sandbox-intercept"
+
+  redirect.loop:
+    records:
+      - type: A
+        address: "0.0.0.0"
+    redirect:
+      code: 302
+      target: "https://github.com/archive/main"

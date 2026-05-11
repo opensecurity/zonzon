@@ -1,0 +1,26 @@
+{
+  "name": "@opensecurity/zonzon-mono",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DNS and HTTP Proxy Infrastructure",
+  "type": "module",
+  "author": "Lucian BLETAN <neuraluc@gmail.com>",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --import tsx --test \"packages/**/*.test.ts\"",
+    "start": "npm start --workspace=@opensecurity/zonzon-cli",
+    "dev": "npm run dev --workspace=@opensecurity/zonzon-cli",
+    "docker:up": "docker compose up",
+    "docker:build": "docker build -t zonzon .",
+    "clean": "rm -rf packages/*/dist tsconfig.tsbuildinfo"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.7.3",
+    "tsx": "^4.19.3"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@opensecurity/zonzon-core": ["packages/core/src/index.ts"],
+      "@opensecurity/zonzon-control-plane": ["packages/control-plane/src/index.ts"]
+    }
+  },
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/control-plane" },
+    { "path": "packages/cli" }
+  ],
+  "files": []
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@opensecurity/zonzon-cli",
+  "version": "0.1.0",
+  "description": "CLI entry point and orchestrator",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "bin": {
+    "zonzon": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch src/cli.ts start",
+    "start": "node ./dist/cli.js start"
+  },
+  "dependencies": {
+    "@opensecurity/zonzon-core": "*",
+    "@opensecurity/zonzon-control-plane": "*",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9"
+  }
+}
