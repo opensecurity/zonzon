@@ -8,9 +8,16 @@ import { firewallEngine } from "./firewall.js";
 
 const MAX_TCP_BUFFER_SIZE = 64 * 1024; 
 
+interface PendingUdpQuery {
+  rinfo: RemoteInfo;
+  originalId: number;
+  timeoutId: NodeJS.Timeout;
+}
+
 export class DnsHandler {
   private server: DevDnsServer;
   private udpServer: dgram.Socket | null = null;
+  private upstreamUdpSocket: dgram.Socket | null = null;
   private tcpServer: net.Server | null = null;
   private port: number;
   private fallbackDns: string | undefined;
@@ -20,7 +27,8 @@ export class DnsHandler {
   private maxTcpConnections: number;
   private tcpIdleTimeoutMs: number;
 
-  private activeUdpForwards = 0;
+  private pendingUpstreamQueries = new Map<number, PendingUdpQuery>();
+  private nextUpstreamId = 1;
   private readonly maxConcurrentUdpForwards = 2000;
 
   private rateLimiter: RateLimiter | null;
@@ -55,6 +63,17 @@ export class DnsHandler {
       });
       this.udpServer = null;
     }
+    if (this.upstreamUdpSocket) {
+      try {
+        this.upstreamUdpSocket.close();
+      } catch {}
+      this.upstreamUdpSocket = null;
+    }
+    for (const pending of this.pendingUpstreamQueries.values()) {
+      clearTimeout(pending.timeoutId);
+    }
+    this.pendingUpstreamQueries.clear();
+
     if (this.tcpServer) {
       await new Promise<void>((resolve) => {
         this.tcpServer?.close(() => resolve());
@@ -65,6 +84,44 @@ export class DnsHandler {
 
   private startUdp(): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.upstreamUdpSocket = dgram.createSocket("udp4");
+      
+      this.upstreamUdpSocket.on("message", (msg: Buffer) => {
+        if (msg.length < 2) return;
+        
+        const upstreamId = msg.readUInt16BE(0);
+        const pending = this.pendingUpstreamQueries.get(upstreamId);
+        
+        if (pending) {
+          clearTimeout(pending.timeoutId);
+          this.pendingUpstreamQueries.delete(upstreamId);
+
+          const restoredMsg = Buffer.from(msg);
+          restoredMsg.writeUInt16BE(pending.originalId, 0);
+
+          const ips = this.parseResolvedIpv4s(restoredMsg);
+          let blockedIp = null;
+          
+          for (const ip of ips) {
+            if (firewallEngine.evaluateIp(ip, this.config.firewall) === "DENY") {
+              blockedIp = ip;
+              break;
+            }
+          }
+
+          if (blockedIp) {
+            const ref = this.server.generateErrorResponse(restoredMsg, DNS_RCODE.REFUSED);
+            this.udpServer?.send(ref, 0, ref.length, pending.rinfo.port, pending.rinfo.address);
+          } else {
+            this.udpServer?.send(restoredMsg, 0, restoredMsg.length, pending.rinfo.port, pending.rinfo.address);
+          }
+        }
+      });
+
+      this.upstreamUdpSocket.on("error", (err: Error) => {
+        audit.error(`Upstream UDP socket fault: ${err.message}`);
+      });
+
       const udp = dgram.createSocket("udp4");
 
       udp.on("message", (data: Buffer, rinfo: RemoteInfo) => {
@@ -155,71 +212,63 @@ export class DnsHandler {
     return ips;
   }
 
-  private forwardUdpQuery(data: Buffer, clientInfo: RemoteInfo): void {
-    if (!this.fallbackDns || !this.udpServer) return;
+  private isPrivateIp(ip: string): boolean {
+    if (!net.isIPv4(ip) && !net.isIPv6(ip)) return false;
+    if (net.isIPv6(ip)) {
+      const normalized = ip.toLowerCase();
+      return normalized === "::1" || normalized.startsWith("fe80:") || normalized.startsWith("fc00:") || normalized.startsWith("fd");
+    }
+    const parts = ip.split('.').map(Number);
+    if (parts[0] === 10) return true;
+    if (parts[0] === 127) return true;
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    return false;
+  }
 
-    if (this.activeUdpForwards >= this.maxConcurrentUdpForwards) {
+  private forwardUdpQuery(data: Buffer, clientInfo: RemoteInfo): void {
+    if (!this.fallbackDns || !this.upstreamUdpSocket) return;
+
+    if (!this.isPrivateIp(clientInfo.address)) {
+      if (this.config.firewall && (!this.config.firewall.allowlist_ips || !this.config.firewall.allowlist_ips.includes(clientInfo.address))) {
+        audit.system(`Dropped UDP forward request from untrusted WAN IP: ${clientInfo.address} (Anti-Amplification)`);
+        return;
+      }
+    }
+
+    if (this.pendingUpstreamQueries.size >= this.maxConcurrentUdpForwards) {
       audit.system("Dropped UDP forward request: Concurrent connection limit reached");
       return;
     }
 
-    this.activeUdpForwards++;
-    const fwdSocket = dgram.createSocket("udp4");
-    let handled = false;
+    if (data.length < 2) return;
 
-    const cleanup = () => {
-      if (!handled) {
-        handled = true;
-        this.activeUdpForwards--;
-        try { fwdSocket.close(); } catch {}
-      }
-    };
+    const originalId = data.readUInt16BE(0);
+    let upstreamId = this.nextUpstreamId++;
+    if (this.nextUpstreamId > 65535) this.nextUpstreamId = 1;
 
-    const timeout = setTimeout(() => {
-      if (!handled) {
-        const ref = this.server.generateErrorResponse(data, DNS_RCODE.SERVFAIL);
-        this.udpServer?.send(ref, 0, ref.length, clientInfo.port, clientInfo.address);
-        cleanup();
-      }
+    let attempts = 0;
+    while (this.pendingUpstreamQueries.has(upstreamId) && attempts < 100) {
+      upstreamId = this.nextUpstreamId++;
+      if (this.nextUpstreamId > 65535) this.nextUpstreamId = 1;
+      attempts++;
+    }
+
+    const queryToForward = Buffer.from(data);
+    queryToForward.writeUInt16BE(upstreamId, 0);
+
+    const timeoutId = setTimeout(() => {
+      this.pendingUpstreamQueries.delete(upstreamId);
+      const ref = this.server.generateErrorResponse(data, DNS_RCODE.SERVFAIL);
+      this.udpServer?.send(ref, 0, ref.length, clientInfo.port, clientInfo.address);
     }, 3000);
 
-    fwdSocket.on("message", (resp) => {
-      if (!handled) {
-        clearTimeout(timeout);
-        
-        const ips = this.parseResolvedIpv4s(resp);
-        let blockedIp = null;
-        
-        for (const ip of ips) {
-          if (firewallEngine.evaluateIp(ip, this.config.firewall) === "DENY") {
-            blockedIp = ip;
-            break;
-          }
-        }
+    this.pendingUpstreamQueries.set(upstreamId, { rinfo: clientInfo, originalId, timeoutId });
 
-        if (blockedIp) {
-          const ref = this.server.generateErrorResponse(data, DNS_RCODE.REFUSED);
-          this.udpServer?.send(ref, 0, ref.length, clientInfo.port, clientInfo.address);
-        } else {
-          this.udpServer?.send(resp, 0, resp.length, clientInfo.port, clientInfo.address);
-        }
-        cleanup();
-      }
-    });
-
-    fwdSocket.on("error", (err) => {
-      if (!handled) {
-        clearTimeout(timeout);
-        const ref = this.server.generateErrorResponse(data, DNS_RCODE.SERVFAIL);
-        this.udpServer?.send(ref, 0, ref.length, clientInfo.port, clientInfo.address);
-        cleanup();
-      }
-    });
-
-    fwdSocket.send(data, 0, data.length, 53, this.fallbackDns, (err) => {
-      if (err && !handled) {
-         clearTimeout(timeout);
-         cleanup();
+    this.upstreamUdpSocket.send(queryToForward, 0, queryToForward.length, 53, this.fallbackDns, (err) => {
+      if (err) {
+        clearTimeout(timeoutId);
+        this.pendingUpstreamQueries.delete(upstreamId);
       }
     });
   }
@@ -261,6 +310,11 @@ export class DnsHandler {
       prefixed.writeUInt16BE(query.length, 0);
       query.copy(prefixed, 2);
       fwd.write(prefixed);
+    });
+
+    fwd.setTimeout(this.tcpIdleTimeoutMs);
+    fwd.on("timeout", () => {
+      fwd.destroy();
     });
 
     fwd.on("data", (data) => {

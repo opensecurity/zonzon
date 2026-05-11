@@ -13,8 +13,10 @@ const MOCK_DEVICE_ID = "test-device-id-1234";
 
 function generateValidPoW(salt: string): string {
   let nonce = 0;
+  const timeWindow = Math.floor(Date.now() / 300000);
+  const challenge = `${salt}:${timeWindow}`;
   while (true) {
-    const hash = createHash("sha256").update(salt + nonce.toString()).digest("hex");
+    const hash = createHash("sha256").update(challenge + nonce.toString()).digest("hex");
     if (hash.startsWith("0000")) {
       return nonce.toString();
     }

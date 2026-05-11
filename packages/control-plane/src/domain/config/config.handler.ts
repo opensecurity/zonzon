@@ -1,5 +1,5 @@
 import * as http from "http";
-import { createHash, createHmac, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual, hkdfSync } from "crypto";
 import { audit } from "@opensecurity/zonzon-core";
 import { ConfigService } from "./config.service.js";
 import { ApiAuthHeaderSchema } from "./config.schema.js";
@@ -14,28 +14,32 @@ export class ConfigHandler {
   constructor(service: ConfigService, rawApiKey: string, blindIndexSalt: string) {
     this.service = service;
     this.blindIndexSalt = blindIndexSalt;
-    this.expectedApiKeyHash = createHmac("sha256", this.blindIndexSalt).update(rawApiKey).digest("hex");
+    const apiKeySecret = hkdfSync("sha256", this.blindIndexSalt, Buffer.alloc(0), "api_key_derivation", 32);
+    this.expectedApiKeyHash = createHmac("sha256", Buffer.from(apiKeySecret)).update(rawApiKey).digest("hex");
   }
 
   private readBodyStrict(req: http.IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
-      let body = "";
+      const chunks: Buffer[] = [];
       let length = 0;
       req.on("data", (chunk: Buffer) => {
         length += chunk.length;
         if (length > 1048576) {
+          req.destroy();
           reject(new Error("Payload size limit exceeded"));
           return;
         }
-        body += chunk.toString("utf8");
+        chunks.push(chunk);
       });
-      req.on("end", () => resolve(body));
+      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
       req.on("error", reject);
     });
   }
 
   private verifyProofOfWork(nonce: string): void {
-    const hash = createHash("sha256").update(this.blindIndexSalt + nonce).digest("hex");
+    const timeWindow = Math.floor(Date.now() / 300000);
+    const challenge = `${this.blindIndexSalt}:${timeWindow}`;
+    const hash = createHash("sha256").update(challenge + nonce).digest("hex");
     if (!hash.startsWith("0000")) {
       throw new Error("Invalid Proof of Work Challenge");
     }
@@ -43,7 +47,6 @@ export class ConfigHandler {
 
   private extractContext(req: http.IncomingMessage, isMutation: boolean): ConfigContext {
     const rawHeaders = {
-      authorization: req.headers.authorization,
       "x-api-key": req.headers["x-api-key"],
       "x-device-id": req.headers["x-device-id"],
       "x-pow-nonce": req.headers["x-pow-nonce"],
@@ -62,7 +65,8 @@ export class ConfigHandler {
       throw new Error("Missing API Key");
     }
 
-    const providedHash = createHmac("sha256", this.blindIndexSalt).update(providedKey).digest("hex");
+    const apiKeySecret = hkdfSync("sha256", this.blindIndexSalt, Buffer.alloc(0), "api_key_derivation", 32);
+    const providedHash = createHmac("sha256", Buffer.from(apiKeySecret)).update(providedKey).digest("hex");
     const expectedBuffer = Buffer.from(this.expectedApiKeyHash, "utf8");
     const providedBuffer = Buffer.from(providedHash, "utf8");
 
@@ -77,7 +81,8 @@ export class ConfigHandler {
       this.verifyProofOfWork(validatedHeaders["x-pow-nonce"]);
     }
 
-    const deviceHash = createHmac("sha256", this.blindIndexSalt).update(validatedHeaders["x-device-id"]).digest("hex");
+    const deviceSecret = hkdfSync("sha256", this.blindIndexSalt, Buffer.alloc(0), "device_id_derivation", 32);
+    const deviceHash = createHmac("sha256", Buffer.from(deviceSecret)).update(validatedHeaders["x-device-id"]).digest("hex");
 
     return {
       tenantId: "system-tenant-001",

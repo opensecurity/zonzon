@@ -4,7 +4,8 @@ export interface RateLimiterOptions {
 }
 
 interface IpBucket {
-  timestamps: number[];
+  count: number;
+  resetTime: number;
 }
 
 export class RateLimiter {
@@ -21,14 +22,9 @@ export class RateLimiter {
 
   private garbageCollect(): void {
     const now = Date.now();
-    const windowStart = now - this.options.windowMs;
-
     for (const [ip, bucket] of this.buckets.entries()) {
-      const validTimestamps = bucket.timestamps.filter((t) => t >= windowStart);
-      if (validTimestamps.length === 0) {
+      if (now >= bucket.resetTime) {
         this.buckets.delete(ip);
-      } else {
-        bucket.timestamps = validTimestamps;
       }
     }
   }
@@ -42,32 +38,28 @@ export class RateLimiter {
     const now = Date.now();
     let bucket = this.buckets.get(ip);
 
-    if (!bucket || now - bucket.timestamps[0] > this.options.windowMs) {
-      bucket = { timestamps: [now] };
+    if (!bucket || now >= bucket.resetTime) {
+      bucket = { count: 1, resetTime: now + this.options.windowMs };
       this.buckets.set(ip, bucket);
       return true;
     }
 
-    const windowStart = now - this.options.windowMs;
-    while (bucket.timestamps.length > 0 && bucket.timestamps[0] < windowStart) {
-      bucket.timestamps.shift();
-    }
-
-    if (bucket.timestamps.length >= this.options.maxRequests) {
+    if (bucket.count >= this.options.maxRequests) {
       return false;
     }
 
-    bucket.timestamps.push(now);
+    bucket.count++;
     return true;
   }
 
   getRequestCount(ip: string): number {
     const now = Date.now();
-    const windowStart = now - this.options.windowMs;
     const bucket = this.buckets.get(ip);
 
-    if (!bucket) return 0;
+    if (!bucket || now >= bucket.resetTime) {
+      return 0;
+    }
 
-    return bucket.timestamps.filter((t) => t >= windowStart).length;
+    return bucket.count;
   }
 }

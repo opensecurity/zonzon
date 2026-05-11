@@ -32,13 +32,14 @@ export class SniProxyService {
       offset += 1 + sessionIdLength;
       if (offset >= data.length) return null;
 
+      if (offset + 2 > data.length) return null;
       const cipherSuitesLength = data.readUInt16BE(offset);
       offset += 2 + cipherSuitesLength;
       if (offset >= data.length) return null;
 
       const compressionMethodsLength = data[offset];
       offset += 1 + compressionMethodsLength;
-      if (offset >= data.length) return null;
+      if (offset + 2 > data.length) return null;
 
       const extensionsLength = data.readUInt16BE(offset);
       offset += 2;
@@ -53,11 +54,15 @@ export class SniProxyService {
           let sniOffset = offset;
           sniOffset += 2;
           
+          if (sniOffset >= data.length) return null;
           const nameType = data[sniOffset];
+          
           if (nameType === 0) {
             sniOffset += 1;
+            if (sniOffset + 2 > data.length) return null;
             const nameLength = data.readUInt16BE(sniOffset);
             sniOffset += 2;
+            if (sniOffset + nameLength > data.length) return null;
             return data.toString("utf8", sniOffset, sniOffset + nameLength);
           }
         }
@@ -73,6 +78,7 @@ export class SniProxyService {
     const clientIp = clientSocket.remoteAddress || "unknown";
     let buffer = Buffer.alloc(0);
     let isHandled = false;
+    let upstreamSocket: net.Socket | null = null;
 
     clientSocket.setTimeout(this.idleTimeoutMs);
     clientSocket.on("timeout", () => {
@@ -80,12 +86,20 @@ export class SniProxyService {
       clientSocket.destroy();
     });
 
+    const absoluteHandshakeTimeout = setTimeout(() => {
+      if (!isHandled && !clientSocket.destroyed) {
+        audit.http(clientIp, "TLS", "UNKNOWN", `:${this.port}`, 408, "Dropped: ClientHello absolute timeout (Slowloris)");
+        clientSocket.destroy();
+      }
+    }, 5000);
+
     clientSocket.on("data", async (chunk: Buffer) => {
       if (isHandled) return;
 
       if (buffer.length + chunk.length > MAX_CLIENT_HELLO_SIZE) {
         audit.http(clientIp, "TLS", "UNKNOWN", `:${this.port}`, 413, "Dropped: ClientHello exceeded maximum permitted size");
         clientSocket.destroy();
+        clearTimeout(absoluteHandshakeTimeout);
         return;
       }
 
@@ -96,6 +110,8 @@ export class SniProxyService {
       if (buffer.length < 5 + recordLength) return;
 
       isHandled = true;
+      clearTimeout(absoluteHandshakeTimeout);
+
       const sni = this.extractSNI(buffer);
 
       if (!sni) {
@@ -128,22 +144,24 @@ export class SniProxyService {
 
         audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 200, `Tunneled to ${targetIp}`);
 
-        const srvSocket = net.connect(443, targetIp, () => {
-          srvSocket.write(buffer);
-          clientSocket.pipe(srvSocket);
-          srvSocket.pipe(clientSocket);
+        upstreamSocket = net.connect(443, targetIp, () => {
+          upstreamSocket!.write(buffer);
+          clientSocket.pipe(upstreamSocket!);
+          upstreamSocket!.pipe(clientSocket);
         });
 
-        srvSocket.setTimeout(this.idleTimeoutMs);
-        srvSocket.on("timeout", () => {
+        upstreamSocket.setTimeout(this.idleTimeoutMs);
+        upstreamSocket.on("timeout", () => {
           audit.error(`SNI Upstream tunnel idle timeout reached for ${sni}:${targetIp}`);
-          srvSocket.destroy();
+          upstreamSocket!.destroy();
         });
 
-        this.activeConnections.add(srvSocket);
-        srvSocket.on("close", () => this.activeConnections.delete(srvSocket));
+        this.activeConnections.add(upstreamSocket);
+        upstreamSocket.on("close", () => {
+          this.activeConnections.delete(upstreamSocket!);
+        });
 
-        srvSocket.on("error", (err) => {
+        upstreamSocket.on("error", (err) => {
           audit.error(`Upstream tunnel fault on ${sni}:443 - ${err.message}`);
           if (!clientSocket.destroyed) clientSocket.destroy();
         });
@@ -156,6 +174,17 @@ export class SniProxyService {
 
     clientSocket.on("error", (err) => {
       audit.error(`Client tunnel fault from ${clientIp} - ${err.message}`);
+      if (upstreamSocket && !upstreamSocket.destroyed) {
+        upstreamSocket.destroy();
+      }
+      clearTimeout(absoluteHandshakeTimeout);
+    });
+
+    clientSocket.on("close", () => {
+      if (upstreamSocket && !upstreamSocket.destroyed) {
+        upstreamSocket.destroy();
+      }
+      clearTimeout(absoluteHandshakeTimeout);
     });
   }
 

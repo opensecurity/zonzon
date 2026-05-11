@@ -113,9 +113,10 @@ export class HttpHandler {
     const port = portStr ? parseInt(portStr, 10) : 443;
 
     try {
-      await this.proxyService.validateTargetFirewall(`https://${hostname}:${port}`, this.config.firewall);
+      const validatedIps = await this.proxyService.validateTargetFirewall(`https://${hostname}:${port}`, this.config.firewall);
+      const targetIp = validatedIps[0];
 
-      audit.http(clientIp, "CONNECT", hostname, `:${port}`, 200, "TCP Tunnel Established");
+      audit.http(clientIp, "CONNECT", hostname, `:${port}`, 200, `TCP Tunnel Established -> ${targetIp}`);
 
       clientSocket.setTimeout(this.idleTimeoutMs);
       clientSocket.on("timeout", () => {
@@ -123,7 +124,7 @@ export class HttpHandler {
         clientSocket.destroy();
       });
 
-      const srvSocket = net.connect(port, hostname, () => {
+      const srvSocket = net.connect(port, targetIp, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head && head.length > 0) {
           srvSocket.write(head);
@@ -206,8 +207,9 @@ export class HttpHandler {
         totalSize += chunk.length;
         if (totalSize > maxBodyBytes) {
           audit.http(clientIp, reqMethod, hostname, reqUrl, 413, targetUrl.hostname);
-          res.writeHead(413, { "Content-Type": "text/html" });
+          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
           res.end("<h1>413 Payload Too Large</h1>");
+          req.destroy();
           return;
         }
         chunks.push(chunk);
@@ -220,6 +222,7 @@ export class HttpHandler {
     const proxiedReqInit: RequestInit = {
       method: reqMethod,
       headers,
+      redirect: "manual",
       signal: AbortSignal.timeout(this.idleTimeoutMs)
     };
 
@@ -353,8 +356,9 @@ export class HttpHandler {
               totalSize += chunk.length;
               if (totalSize > maxBodyBytes) {
                 audit.http(clientIp, reqMethod, hostname, reqUrl, 413, upstreamBase.hostname);
-                res.writeHead(413, { "Content-Type": "text/html" });
+                res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
                 res.end("<h1>413 Payload Too Large</h1>");
+                req.destroy();
                 return;
               }
               chunks.push(chunk);
@@ -367,6 +371,7 @@ export class HttpHandler {
           const proxiedReqInit: RequestInit = {
             method: reqMethod,
             headers,
+            redirect: "manual",
             signal: AbortSignal.timeout(this.idleTimeoutMs)
           };
 
@@ -436,12 +441,23 @@ export class HttpHandler {
       const proxiedReqInit: RequestInit = { 
         method: reqMethod, 
         headers,
+        redirect: "manual",
         signal: AbortSignal.timeout(this.idleTimeoutMs)
       };
       
       if (reqMethod !== "GET" && reqMethod !== "HEAD") {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk);
+        let totalSize = 0;
+        for await (const chunk of req) {
+          totalSize += chunk.length;
+          if (totalSize > (this.config.hosts[hostname]?.http_proxy?.maxRequestBodyBytes ?? 5242880)) {
+             res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+             res.end("<h1>413 Payload Too Large</h1>");
+             req.destroy();
+             return;
+          }
+          chunks.push(chunk);
+        }
         if (chunks.length > 0) {
           proxiedReqInit.body = Buffer.concat(chunks) as unknown as BodyInit;
           (proxiedReqInit as any).duplex = "half";
