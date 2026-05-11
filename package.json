@@ -31,9 +31,9 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "test": "node --import tsx --test \"packages/**/*.test.ts\"",
+    "test": "node --disable-warning=DEP0205 --import tsx --test \"packages/**/*.test.ts\"",
     "start": "npm start --workspace=@opensecurity/zonzon-cli",
-    "dev": "npm run dev --workspace=@opensecurity/zonzon-cli",
+    "dev": "npm run build && npm run dev:watch --workspace=@opensecurity/zonzon-cli",
     "docker:up": "docker compose up",
     "docker:build": "docker build -t zonzon .",
     "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo tsconfig.tsbuildinfo"

@@ -76,6 +76,8 @@ const ControlPlaneSchema = z.object({
 
 const ServerConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(53),
+  httpPort: z.coerce.number().int().min(1).max(65535).optional(),
+  httpsPort: z.coerce.number().int().min(1).max(65535).optional(),
   fallbackDns: Ipv4Schema.optional(),
   firewall: FirewallSchema.optional(),
   controlPlane: ControlPlaneSchema.optional(),

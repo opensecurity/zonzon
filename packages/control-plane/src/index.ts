@@ -1,5 +1,5 @@
 import * as http from "http";
-import { ServerConfig, validateServerConfig, audit } from "@opensecurity/zonzon-core";
+import { ServerConfig, audit } from "@opensecurity/zonzon-core";
 import { ConfigService } from "./domain/config/config.service.js";
 import { ConfigHandler } from "./domain/config/config.handler.js";
 

@@ -19,7 +19,7 @@ import { ControlPlane } from "@opensecurity/zonzon-control-plane";
 const CONFIG_DIR = path.join(os.homedir(), ".zonzon");
 const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-function ensureConfigDir() {
+function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
@@ -66,7 +66,7 @@ function setDeepValue(obj: any, pathStr: string, value: any): void {
   else current[last] = value;
 }
 
-function printUsage() {
+function printUsage(): void {
   console.log(`
 zonzon core engine (v0.1.0)
 Usage: zonzon <command> [options]
@@ -88,7 +88,7 @@ Global Options:
   process.exit(0);
 }
 
-async function handleInit(configPath: string) {
+async function handleInit(configPath: string): Promise<void> {
   if (fs.existsSync(configPath)) {
     audit.error(`Configuration already exists at ${configPath}`);
     process.exit(1);
@@ -96,6 +96,8 @@ async function handleInit(configPath: string) {
   
   const defaultConf = {
     port: 53,
+    httpPort: 80,
+    httpsPort: 443,
     fallbackDns: "1.1.1.1",
     maxTcpConnections: 100,
     tcpIdleTimeoutMs: 30000,
@@ -112,10 +114,12 @@ async function handleInit(configPath: string) {
 
   saveConfig(configPath, defaultConf);
   audit.system(`Initialized secure default configuration at ${configPath}`);
+  audit.system(`Security Notice: Default HTTP/HTTPS ports mapped to 80/443.`);
+  audit.system(`If executing within a non-root sandbox, mutate config.json to unprivileged ports (e.g. 8080/8443) to prevent EACCES binding faults.`);
   process.exit(0);
 }
 
-async function handleConfig(configPath: string, args: string[]) {
+async function handleConfig(configPath: string, args: string[]): Promise<void> {
   const subCmd = args[0];
   if (subCmd === "view") {
     if (!fs.existsSync(configPath)) {
@@ -145,7 +149,52 @@ async function handleConfig(configPath: string, args: string[]) {
   printUsage();
 }
 
-async function startEngine(configPath: string, portOverride?: string, cpPortOverride?: string) {
+class ZonzonDaemon {
+  private dnsHandler: DnsHandler | null = null;
+  private httpHandler: HttpHandler | null = null;
+  private sniProxy: SniProxyService | null = null;
+
+  public async start(config: ServerConfig): Promise<void> {
+    try {
+      const dnsServer = new DevDnsServer(config);
+      
+      this.dnsHandler = new DnsHandler(dnsServer, config);
+      await this.dnsHandler.start();
+      audit.system(`DNS Listener actively enforcing Zero-Trust boundaries on port ${config.port}`);
+
+      this.httpHandler = new HttpHandler(dnsServer, config, config.httpPort ?? 80);
+      await this.httpHandler.start();
+      audit.system(`HTTP L7 Sandbox Router active on port ${config.httpPort ?? 80}`);
+
+      this.sniProxy = new SniProxyService(config, config.httpsPort ?? 443);
+      await this.sniProxy.start();
+      audit.system(`SNI Proxy active on port ${config.httpsPort ?? 443}`);
+
+    } catch (err: any) {
+      audit.error(`Fatal bind error during initialization: ${err.message}`);
+      await this.stop();
+      process.exit(1);
+    }
+  }
+
+  public async stop(): Promise<void> {
+    if (this.dnsHandler) {
+      await this.dnsHandler.stop();
+      this.dnsHandler = null;
+    }
+    if (this.httpHandler) {
+      await this.httpHandler.stop();
+      this.httpHandler = null;
+    }
+    if (this.sniProxy) {
+      await this.sniProxy.stop();
+      this.sniProxy = null;
+    }
+    audit.system("Subsystems halted. Sockets closed.");
+  }
+}
+
+async function startEngine(configPath: string, portOverride?: string, cpPortOverride?: string): Promise<void> {
   const rawConfig = loadConfig(configPath);
 
   if (portOverride) {
@@ -165,10 +214,8 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
     process.exit(1);
   }
 
-  const dnsServer = new DevDnsServer(config);
-  const dnsHandler = new DnsHandler(dnsServer, config);
-  const httpHandler = new HttpHandler(dnsServer, config, 80);
-  const sniProxy = new SniProxyService(config, 443);
+  const daemon = new ZonzonDaemon();
+  await daemon.start(config);
 
   const isCpEnabled = config.controlPlane?.enabled !== false;
   let controlPlane: ControlPlane | null = null;
@@ -192,16 +239,26 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
       initialConfig: config,
     });
 
-    controlPlane.subscribe((newConfig) => {
+    controlPlane.subscribe(async (newConfig: ServerConfig) => {
       audit.system("Applying dynamic configuration update from Control Plane...");
+      await daemon.stop();
+      await daemon.start(newConfig);
     });
+
+    await controlPlane.start();
+    if (isEphemeralKey) {
+      audit.system(`[SECURITY] Generated Ephemeral API Key for this session: ${activeApiKey}`);
+      audit.system(`[SECURITY] Do not lose this key. It will not be shown again.`);
+    } else {
+      audit.system(`[SECURITY] Control Plane using static API Key from configuration.`);
+    }
   }
+
+  audit.system("Initialization complete. Awaiting connections...");
 
   const shutdown = async () => {
     audit.system("Initiating graceful shutdown sequence...");
-    await dnsHandler.stop();
-    await httpHandler.stop();
-    await sniProxy.stop();
+    await daemon.stop();
     if (controlPlane) {
       await controlPlane.stop();
     }
@@ -210,35 +267,9 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-
-  try {
-    await dnsHandler.start();
-    audit.system(`DNS Listener actively enforcing Zero-Trust boundaries on port ${config.port}`);
-
-    await httpHandler.start();
-    audit.system(`HTTP L7 Sandbox Router active on port 80`);
-
-    await sniProxy.start();
-    audit.system(`SNI Proxy active on port 443`);
-
-    if (controlPlane) {
-      await controlPlane.start();
-      if (isEphemeralKey) {
-        audit.system(`[SECURITY] Generated Ephemeral API Key for this session: ${activeApiKey}`);
-        audit.system(`[SECURITY] Do not lose this key. It will not be shown again.`);
-      } else {
-        audit.system(`[SECURITY] Control Plane using static API Key from configuration.`);
-      }
-    }
-
-    audit.system("Initialization complete. Awaiting connections...");
-  } catch (err: any) {
-    audit.error(`Fatal bind error during initialization: ${err.message}`);
-    await shutdown();
-  }
 }
 
-async function main() {
+async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     options: {
       config: {

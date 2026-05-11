@@ -1,6 +1,12 @@
 {
-  "port": 53,
+  "port": 45353,
+  "httpPort": 8080,
+  "httpsPort": 8443,
   "fallbackDns": "1.1.1.1",
+  "controlPlane": {
+    "enabled": true,
+    "port": 58080
+  },
   "firewall": {
     "defaultPolicy": "deny",
     "allowlist_domains": [

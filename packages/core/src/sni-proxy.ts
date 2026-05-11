@@ -10,9 +10,9 @@ export class SniProxyService {
   private server: net.Server | null = null;
   private activeConnections = new Set<net.Socket>();
 
-  constructor(config: ServerConfig, port: number = 443) {
+  constructor(config: ServerConfig, port?: number) {
     this.config = config;
-    this.port = port;
+    this.port = config.httpsPort ?? port ?? 443;
   }
 
   private extractSNI(data: Buffer): string | null {
@@ -83,7 +83,7 @@ export class SniProxyService {
       const sni = this.extractSNI(buffer);
 
       if (!sni) {
-        audit.http(clientIp, "TLS", "UNKNOWN", ":443", 400, "Dropped: No SNI detected");
+        audit.http(clientIp, "TLS", "UNKNOWN", `:${this.port}`, 400, "Dropped: No SNI detected");
         clientSocket.destroy();
         return;
       }
@@ -105,7 +105,7 @@ export class SniProxyService {
           throw new Error(`Target IP ${targetIp} blocked by Firewall policy`);
         }
 
-        audit.http(clientIp, "TLS-SNI", sni, ":443", 200, `Tunneled to ${targetIp}`);
+        audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 200, `Tunneled to ${targetIp}`);
 
         const srvSocket = net.connect(443, targetIp, () => {
           srvSocket.write(buffer);
@@ -122,7 +122,7 @@ export class SniProxyService {
         });
 
       } catch (err: any) {
-        audit.http(clientIp, "TLS-SNI", sni, ":443", 403, `Blocked: ${err.message}`);
+        audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 403, `Blocked: ${err.message}`);
         clientSocket.destroy();
       }
     });

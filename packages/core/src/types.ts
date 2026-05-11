@@ -82,6 +82,8 @@ export interface ControlPlaneConfig {
 
 export interface ServerConfig {
   port: number;
+  httpPort?: number;
+  httpsPort?: number;
   fallbackDns?: string;
   firewall?: FirewallConfig;
   controlPlane?: ControlPlaneConfig;

@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc -b",
     "start": "node dist/cli.js",
-    "dev": "tsx watch src/cli.ts"
+    "dev:watch": "NODE_OPTIONS=--disable-warning=DEP0205 tsx watch src/cli.ts start --config ../../config/hosts.json"
   },
   "dependencies": {
     "@opensecurity/zonzon-core": "^0.1.3",

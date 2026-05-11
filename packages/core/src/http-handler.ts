@@ -63,11 +63,11 @@ export class HttpHandler {
   private circuitBreakers = new Map<string, ProxyCircuitBreaker>();
   private activeConnections = new Set<net.Socket>();
 
-  constructor(dnsServer: DevDnsServer, config: ServerConfig, port: number = 80) {
+  constructor(dnsServer: DevDnsServer, config: ServerConfig, port?: number) {
     this.dnsServer = dnsServer;
     this.proxyService = new HttpProxyService();
-    this.port = port;
     this.config = config;
+    this.port = config.httpPort ?? port ?? 80;
   }
 
   private getCircuitBreaker(upstream: string): ProxyCircuitBreaker {
