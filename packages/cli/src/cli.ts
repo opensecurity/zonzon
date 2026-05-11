@@ -89,13 +89,18 @@ Config Commands:
 
 Global Options:
   --config, -c   Override path to configuration file (default: ~/.zonzon/config.json)
+  --json         Output CLI command results in pure JSON format
   `);
   process.exit(0);
 }
 
-async function handleInit(configPath: string): Promise<void> {
+async function handleInit(configPath: string, isJson: boolean): Promise<void> {
   if (fs.existsSync(configPath)) {
-    audit.error(`Configuration already exists at ${configPath}`);
+    if (isJson) {
+      console.log(JSON.stringify({ success: false, error: "Configuration already exists", path: configPath }));
+    } else {
+      audit.error(`Configuration already exists at ${configPath}`);
+    }
     process.exit(1);
   }
   
@@ -118,21 +123,37 @@ async function handleInit(configPath: string): Promise<void> {
   };
 
   saveConfig(configPath, defaultConf);
-  audit.system(`Initialized secure default configuration at ${configPath}`);
-  audit.system(`Security Notice: Default HTTP/HTTPS ports mapped to 80/443.`);
-  audit.system(`If executing within a non-root sandbox, mutate config.json to unprivileged ports (e.g. 8080/8443) to prevent EACCES binding faults.`);
+
+  if (isJson) {
+    console.log(JSON.stringify({ success: true, action: "init", path: configPath, config: defaultConf }));
+  } else {
+    audit.system(`Initialized secure default configuration at ${configPath}`);
+    audit.system(`Security Notice: Default HTTP/HTTPS ports mapped to 80/443.`);
+    audit.system(`If executing within a non-root sandbox, mutate config.json to unprivileged ports (e.g. 8080/8443) to prevent EACCES binding faults.`);
+  }
   process.exit(0);
 }
 
-async function handleConfig(configPath: string, args: string[]): Promise<void> {
+async function handleConfig(configPath: string, args: string[], isJson: boolean): Promise<void> {
   const subCmd = args[0];
+  
   if (subCmd === "view") {
     if (!fs.existsSync(configPath)) {
-      audit.error(`No configuration found at ${configPath}. Run 'zonzon init' first.`);
+      if (isJson) {
+        console.log(JSON.stringify({ success: false, error: "No configuration found. Run init first." }));
+      } else {
+        audit.error(`No configuration found at ${configPath}. Run 'zonzon init' first.`);
+      }
       process.exit(1);
     }
+    
     const fileContents = fs.readFileSync(configPath, "utf8");
-    console.log(fileContents);
+    if (isJson) {
+      // Print raw JSON string on a single line for jq consumption
+      console.log(JSON.stringify(JSON.parse(fileContents)));
+    } else {
+      console.log(fileContents);
+    }
     process.exit(0);
   }
 
@@ -140,14 +161,23 @@ async function handleConfig(configPath: string, args: string[]): Promise<void> {
     const key = args[1];
     const value = args[2];
     if (!key || value === undefined) {
-      audit.error("Usage: zonzon config set <key> <value>");
+      if (isJson) {
+        console.log(JSON.stringify({ success: false, error: "Missing key or value" }));
+      } else {
+        audit.error("Usage: zonzon config set <key> <value>");
+      }
       process.exit(1);
     }
 
     const currentConfig = loadConfig(configPath);
     setDeepValue(currentConfig, key, value);
     saveConfig(configPath, currentConfig);
-    audit.system(`Updated configuration: ${key} = ${value}`);
+
+    if (isJson) {
+      console.log(JSON.stringify({ success: true, action: "set", key, value }));
+    } else {
+      audit.system(`Updated configuration: ${key} = ${value}`);
+    }
     process.exit(0);
   }
 
@@ -302,6 +332,10 @@ async function main(): Promise<void> {
       "cp-port": {
         type: "string",
       },
+      json: {
+        type: "boolean",
+        default: false,
+      }
     },
     strict: false,
     allowPositionals: true
@@ -311,13 +345,15 @@ async function main(): Promise<void> {
   const configPath = values.config 
     ? path.resolve(process.cwd(), values.config as string)
     : DEFAULT_CONFIG_PATH;
+    
+  const isJson = values.json as boolean;
 
   switch (command) {
     case "init":
-      await handleInit(configPath);
+      await handleInit(configPath, isJson);
       break;
     case "config":
-      await handleConfig(configPath, positionals.slice(1));
+      await handleConfig(configPath, positionals.slice(1), isJson);
       break;
     case "start":
       await startEngine(configPath, values.port as string, values["cp-port"] as string);

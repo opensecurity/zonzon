@@ -206,14 +206,15 @@ export class SniProxyService {
 
   public async stop(): Promise<void> {
     if (this.server) {
-      for (const socket of this.activeConnections) {
-        socket.destroy();
+      if ('closeIdleConnections' in this.server) {
+         (this.server as any).closeIdleConnections();
       }
-      this.activeConnections.clear();
-
+      
       await new Promise<void>((resolve) => {
         this.server!.close(() => resolve());
       });
+      
+      this.activeConnections.clear();
       this.server = null;
     }
   }

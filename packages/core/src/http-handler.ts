@@ -1,4 +1,5 @@
 import * as http from "http";
+import * as https from "https";
 import type { IncomingMessage, ServerResponse } from "http";
 import * as net from "net";
 import * as dns from "dns/promises";
@@ -100,17 +101,6 @@ export class HttpHandler {
     return undefined;
   }
 
-  private injectCustomHeaders(responseHeaders: Headers, hostConfig: HostConfig): void {
-    if (!hostConfig.http_proxy?.enabled) return;
-
-    for (const [key, value] of Object.entries(hostConfig.http_proxy.headers)) {
-      const sanitized = this.proxyService.sanitizeHeader(value);
-      if (sanitized) {
-        responseHeaders.set(key, sanitized);
-      }
-    }
-  }
-
   private async handleConnect(req: IncomingMessage, clientSocket: net.Socket, head: Buffer): Promise<void> {
     const clientIp = req.socket.remoteAddress || "unknown";
     const targetUrl = req.url || "";
@@ -166,6 +156,73 @@ export class HttpHandler {
     }
   }
 
+  private async doHttpProxy(
+    targetUrl: URL,
+    targetIp: string,
+    hostname: string,
+    reqMethod: string,
+    reqHeaders: http.IncomingHttpHeaders,
+    bodyBuffer: Buffer | undefined,
+    clientIp: string,
+    res: http.ServerResponse,
+    breaker: ProxyCircuitBreaker,
+    auditUrl: string,
+    customReqHeaders: Record<string, string> = {},
+    customResHeaders: Record<string, string> = {}
+  ): Promise<void> {
+    const hopByHop = this.proxyService.getHopByHopHeaders();
+    const outReqHeaders: Record<string, string> = {};
+
+    for (const [k, v] of Object.entries(reqHeaders)) {
+      if (!hopByHop.includes(k.toLowerCase()) && v !== undefined) {
+        outReqHeaders[k] = Array.isArray(v) ? v.join(", ") : v;
+      }
+    }
+    outReqHeaders["Host"] = hostname;
+
+    for (const [k, v] of Object.entries(customReqHeaders)) {
+      outReqHeaders[k] = v;
+    }
+
+    const reqOptions: http.RequestOptions | https.RequestOptions = {
+      hostname: targetIp,
+      port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
+      path: targetUrl.pathname + targetUrl.search,
+      method: reqMethod,
+      headers: outReqHeaders,
+      timeout: this.idleTimeoutMs,
+      servername: targetUrl.protocol === "https:" ? hostname : undefined,
+      rejectUnauthorized: false
+    };
+
+    const requestModule = targetUrl.protocol === "https:" ? https : http;
+
+    const proxyResp = await breaker.execute(() => new Promise<http.IncomingMessage>((resolve, reject) => {
+      const proxyReq = requestModule.request(reqOptions, resolve);
+      proxyReq.on("error", reject);
+      proxyReq.on("timeout", () => { proxyReq.destroy(); reject(new Error("TimeoutError")); });
+      if (bodyBuffer) {
+        proxyReq.write(bodyBuffer);
+      }
+      proxyReq.end();
+    }));
+
+    const outResHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(proxyResp.headers)) {
+      if (!hopByHop.includes(k.toLowerCase()) && v !== undefined) {
+        outResHeaders[k] = Array.isArray(v) ? v.join(", ") : v;
+      }
+    }
+
+    for (const [k, v] of Object.entries(customResHeaders)) {
+      outResHeaders[k] = v;
+    }
+
+    audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, proxyResp.statusCode || 502, auditUrl);
+    res.writeHead(proxyResp.statusCode || 502, outResHeaders);
+    proxyResp.pipe(res);
+  }
+
   private async handleForwardProxy(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const clientIp = req.socket.remoteAddress || "unknown";
     const reqMethod = req.method || "GET";
@@ -185,23 +242,6 @@ export class HttpHandler {
     }
 
     const targetIp = validatedIps[0];
-    targetUrl.hostname = targetIp;
-
-    const headers = new Headers();
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (Array.isArray(v)) {
-        headers.set(k, v.join(", "));
-      } else if (typeof v === "string") {
-        headers.set(k, v);
-      }
-    }
-    
-    headers.set("Host", hostname);
-
-    const hopByHop = this.proxyService.getHopByHopHeaders();
-    for (const h of hopByHop) {
-      headers.delete(h);
-    }
 
     const maxBodyBytes = 5 * 1024 * 1024;
     let bodyBuffer: Buffer | undefined = undefined;
@@ -225,37 +265,23 @@ export class HttpHandler {
       }
     }
 
-    const proxiedReqInit: RequestInit = {
-      method: reqMethod,
-      headers,
-      redirect: "manual",
-      signal: AbortSignal.timeout(this.idleTimeoutMs)
-    };
-
-    if (bodyBuffer) {
-      proxiedReqInit.body = bodyBuffer as unknown as BodyInit;
-      (proxiedReqInit as any).duplex = "half";
-    }
-
-    const proxiedReq = new Request(targetUrl.toString(), proxiedReqInit);
     const breaker = this.getCircuitBreaker(hostname);
 
     try {
-      const proxyResp = await breaker.execute(() => fetch(proxiedReq));
-      const outHeaders: Record<string, string> = {};
-      
-      proxyResp.headers.forEach((value, key) => {
-        if (!hopByHop.includes(key.toLowerCase())) {
-           outHeaders[key] = value;
-        }
-      });
-
-      audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, proxyResp.status, targetUrl.toString());
-      res.writeHead(proxyResp.status, outHeaders);
-      const responseBuffer = Buffer.from(await proxyResp.arrayBuffer());
-      res.end(responseBuffer);
+      await this.doHttpProxy(
+        targetUrl,
+        targetIp,
+        hostname,
+        reqMethod,
+        req.headers,
+        bodyBuffer,
+        clientIp,
+        res,
+        breaker,
+        targetUrl.toString()
+      );
     } catch (err: any) {
-      if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+      if (err.name === 'AbortError' || err.name === 'TimeoutError' || err.message === 'TimeoutError') {
         audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 504, "Upstream Gateway Timeout");
         res.writeHead(504, { "Content-Type": "text/html" });
         res.end(`<h1>504 Gateway Timeout</h1>`);
@@ -337,19 +363,17 @@ export class HttpHandler {
 
           const targetUrl = new URL(safePath, upstreamBase);
           const originalHostname = targetUrl.hostname;
-          targetUrl.hostname = targetIp;
 
-          const headers = new Headers();
+          const customReqHeaders: Record<string, string> = {};
+          const customResHeaders: Record<string, string> = { "X-Proxy": "zonzon" };
 
-          for (const [k, v] of Object.entries(req.headers)) {
-            if (Array.isArray(v)) {
-              headers.set(k, v.join(", "));
-            } else if (typeof v === "string") {
-              headers.set(k, v);
+          for (const [key, value] of Object.entries(hostConfig.http_proxy.headers)) {
+            const sanitized = this.proxyService.sanitizeHeader(value);
+            if (sanitized) {
+              customReqHeaders[key] = sanitized;
+              customResHeaders[key] = sanitized;
             }
           }
-          
-          headers.set("Host", originalHostname);
 
           const shouldForwardBody = hostConfig.http_proxy.forwardRequestBody;
           const maxBodyBytes = hostConfig.http_proxy.maxRequestBodyBytes ?? 5 * 1024 * 1024;
@@ -374,35 +398,26 @@ export class HttpHandler {
             }
           }
 
-          const proxiedReqInit: RequestInit = {
-            method: reqMethod,
-            headers,
-            redirect: "manual",
-            signal: AbortSignal.timeout(this.idleTimeoutMs)
-          };
-
           if (shouldForwardBody && bodyBuffer) {
-            proxiedReqInit.body = bodyBuffer as unknown as BodyInit;
-            (proxiedReqInit as any).duplex = "half";
+            customReqHeaders["X-Body-Forwarded"] = "true";
+            customReqHeaders["X-Body-Size"] = String(bodyBuffer.length);
           }
 
-          const proxiedReq = new Request(targetUrl.toString(), proxiedReqInit);
           const breaker = this.getCircuitBreaker(originalHostname);
-
-          const proxyResp = await breaker.execute(() => fetch(proxiedReq));
-          const responseHeaders = new Headers(proxyResp.headers);
-          
-          this.injectCustomHeaders(responseHeaders, hostConfig);
-
-          const outHeaders: Record<string, string> = {};
-          responseHeaders.forEach((value, key) => {
-            outHeaders[key] = value;
-          });
-
-          audit.http(clientIp, reqMethod, hostname, safePath, proxyResp.status, targetUrl.toString());
-          res.writeHead(proxyResp.status, outHeaders);
-          const responseBuffer = Buffer.from(await proxyResp.arrayBuffer());
-          res.end(responseBuffer);
+          await this.doHttpProxy(
+            targetUrl,
+            targetIp,
+            originalHostname,
+            reqMethod,
+            req.headers,
+            bodyBuffer,
+            clientIp,
+            res,
+            breaker,
+            targetUrl.toString(),
+            customReqHeaders,
+            customResHeaders
+          );
           return;
         }
       }
@@ -434,23 +449,9 @@ export class HttpHandler {
         return;
       }
 
-      const targetUrl = new URL(reqUrl, `http://${targetIp}`);
-      const headers = new Headers();
-
-      for (const [k, v] of Object.entries(req.headers)) {
-        if (Array.isArray(v)) headers.set(k, v.join(", "));
-        else if (typeof v === "string") headers.set(k, v);
-      }
+      const targetUrl = new URL(reqUrl, `http://${hostname}`);
       
-      headers.set("Host", hostname);
-
-      const proxiedReqInit: RequestInit = { 
-        method: reqMethod, 
-        headers,
-        redirect: "manual",
-        signal: AbortSignal.timeout(this.idleTimeoutMs)
-      };
-      
+      let bodyBuffer: Buffer | undefined = undefined;
       if (reqMethod !== "GET" && reqMethod !== "HEAD") {
         const chunks: Buffer[] = [];
         let totalSize = 0;
@@ -465,27 +466,29 @@ export class HttpHandler {
           chunks.push(chunk);
         }
         if (chunks.length > 0) {
-          proxiedReqInit.body = Buffer.concat(chunks) as unknown as BodyInit;
-          (proxiedReqInit as any).duplex = "half";
+          bodyBuffer = Buffer.concat(chunks);
         }
       }
 
-      const proxiedReq = new Request(targetUrl.toString(), proxiedReqInit);
       const breaker = this.getCircuitBreaker(hostname);
-      const proxyResp = await breaker.execute(() => fetch(proxiedReq));
-      
-      const outHeaders: Record<string, string> = {};
-      proxyResp.headers.forEach((value, key) => { outHeaders[key] = value; });
-
-      audit.http(clientIp, reqMethod, hostname, reqUrl, proxyResp.status, targetIp);
-      res.writeHead(proxyResp.status, outHeaders);
-      res.end(Buffer.from(await proxyResp.arrayBuffer()));
+      await this.doHttpProxy(
+        targetUrl,
+        targetIp,
+        hostname,
+        reqMethod,
+        req.headers,
+        bodyBuffer,
+        clientIp,
+        res,
+        breaker,
+        targetIp
+      );
 
     } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       audit.error(`HTTP request failed: ${message}`);
 
-      if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+      if (err.name === 'AbortError' || err.name === 'TimeoutError' || message === 'TimeoutError') {
         audit.http(clientIp, reqMethod, hostname, reqUrl, 504, "Upstream Gateway Timeout");
         res.writeHead(504, { "Content-Type": "text/html" });
         res.end(`<h1>504 Gateway Timeout</h1>`);
@@ -550,18 +553,15 @@ export class HttpHandler {
 
   async stop(): Promise<void> {
     if (this.server) {
-      for (const socket of this.activeConnections) {
-        socket.destroy();
-      }
-      this.activeConnections.clear();
-
-      if ('closeAllConnections' in this.server) {
-         (this.server as any).closeAllConnections();
+      if ('closeIdleConnections' in this.server) {
+         (this.server as any).closeIdleConnections();
       }
 
       await new Promise<void>((resolve) => {
         this.server!.close(() => resolve());
       });
+      
+      this.activeConnections.clear();
       this.server = null;
     }
   }

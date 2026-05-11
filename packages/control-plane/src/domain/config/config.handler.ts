@@ -109,6 +109,17 @@ export class ConfigHandler {
     const method = req.method || "GET";
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
+    if (url.pathname === "/metrics") {
+      if (method !== "GET") {
+        res.writeHead(405);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
+      res.end(audit.getMetricsPrometheus());
+      return;
+    }
+
     if (url.pathname !== "/api/v1/config") {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Endpoint Not Found" }));

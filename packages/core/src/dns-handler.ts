@@ -100,15 +100,15 @@ export class DnsHandler {
     }
 
     if (this.dohServer) {
+      if ('closeIdleConnections' in this.dohServer) {
+         (this.dohServer as any).closeIdleConnections();
+      }
       await new Promise<void>((resolve) => {
         this.dohServer?.close(() => resolve());
       });
       this.dohServer = null;
     }
 
-    for (const [socket] of this.activeTcpConnections) {
-      if (!socket.destroyed) socket.destroy();
-    }
     this.activeTcpConnections.clear();
   }
 

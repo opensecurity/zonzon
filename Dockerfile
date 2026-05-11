@@ -22,10 +22,10 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/packages ./packages
 COPY --from=build /app/config ./config
 
-EXPOSE 53/udp 53/tcp 80/tcp 443/tcp
+EXPOSE 53/udp 53/tcp 80/tcp 443/tcp 853/tcp 8443/tcp 8080/tcp
 
 RUN addgroup -S zonzon && adduser -S zonzon -G zonzon
 USER zonzon
 
 ENTRYPOINT ["node", "packages/cli/dist/cli.js"]
-CMD ["--config", "/app/config/hosts.json", "--port", "53"]
+CMD ["start", "--config", "/app/config/hosts.json", "--port", "53"]
