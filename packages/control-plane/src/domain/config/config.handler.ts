@@ -1,4 +1,4 @@
-import * as http from "http";
+import * as http from "node:http";
 import { createHash, createHmac, timingSafeEqual, hkdfSync } from "crypto";
 import { audit } from "@opensecurity/zonzon-core";
 import { ConfigService } from "./config.service.js";

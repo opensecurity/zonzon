@@ -1,5 +1,5 @@
 import dgram, { RemoteInfo } from "dgram";
-import * as net from "net";
+import * as net from "node:net";
 import * as tls from "node:tls";
 import * as https from "node:https";
 import * as http from "node:http";

@@ -1,11 +1,9 @@
-#!/usr/bin/env node
-
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
-import { parseArgs } from "util";
-import { randomBytes } from "crypto";
-import { createRequire } from "module";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import { parseArgs } from "node:util";
+import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   DevDnsServer,
   DnsHandler,

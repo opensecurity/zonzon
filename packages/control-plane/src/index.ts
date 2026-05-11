@@ -1,4 +1,4 @@
-import * as http from "http";
+import * as http from "node:http";
 import * as fs from "node:fs";
 import { ServerConfig, audit } from "@opensecurity/zonzon-core";
 import { ConfigService } from "./domain/config/config.service.js";

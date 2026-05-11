@@ -1,6 +1,6 @@
 {
   "name": "@opensecurity/zonzon-cli",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "cli interface for zonzon",
   "type": "module",
   "author": "Lucian BLETAN <neuraluc@gmail.com>",
@@ -31,7 +31,7 @@
     "dev:watch": "NODE_OPTIONS=--disable-warning=DEP0205 tsx watch src/cli.ts start --config ../../config/hosts.json"
   },
   "dependencies": {
-    "@opensecurity/zonzon-core": "^0.1.5",
-    "@opensecurity/zonzon-control-plane": "^0.1.5"
+    "@opensecurity/zonzon-core": "^0.1.6",
+    "@opensecurity/zonzon-control-plane": "^0.1.6"
   }
 }

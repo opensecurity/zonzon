@@ -1,5 +1,5 @@
-import * as net from "net";
-import * as dns from "dns/promises";
+import * as net from "node:net";
+import * as dns from "node:dns/promises";
 import { HostConfig, ProxiedRequest, ModifiedHeaders, FirewallConfig } from "./types.js";
 import { firewallEngine } from "./firewall.js";
 

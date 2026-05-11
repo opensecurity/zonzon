@@ -1,5 +1,5 @@
 import { describe, it } from "node:test";
-import assert from "assert";
+import assert from "node:assert";
 import { DevDnsServer } from "./dns-service.js";
 import { ServerConfig, DNS_TYPES, DNS_CLASSES } from "./types.js";
 

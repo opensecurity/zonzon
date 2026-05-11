@@ -1,8 +1,8 @@
-import * as http from "http";
-import * as https from "https";
-import type { IncomingMessage, ServerResponse } from "http";
-import * as net from "net";
-import * as dns from "dns/promises";
+import * as http from "node:http";
+import * as https from "node:https";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import * as net from "node:net";
+import * as dns from "node:dns/promises";
 import { DevDnsServer } from "./dns-service.js";
 import { HttpProxyService } from "./http-proxy.js";
 import { HostConfig, ServerConfig } from "./types.js";

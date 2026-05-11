@@ -1,115 +1,138 @@
-import { describe, it, before, after } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert";
-import * as net from "net";
-import * as tls from "node:tls";
-import * as https from "node:https";
-import { generateKeyPairSync } from "node:crypto";
 import { DnsHandler } from "./dns-handler.js";
 import { DevDnsServer } from "./dns-service.js";
-import { ServerConfig, DNS_TYPES, DNS_RCODE } from "./types.js";
+import { ServerConfig } from "./types.js";
 
-function buildDnsQuery(name: string, type: number): Buffer {
-  const encoder = new (class {
-    buf = Buffer.alloc(256);
-    offset = 0;
-    writeUint16(v: number) { this.buf.writeUInt16BE(v, this.offset); this.offset += 2; }
-    writeUint8(v: number) { this.buf.writeUInt8(v, this.offset); this.offset += 1; }
-    writeDomainName(nm: string) {
-      for (const label of nm.split(".")) {
-        if (!label.length) continue;
-        this.writeUint8(label.length);
-        Buffer.from(label).copy(this.buf, this.offset);
-        this.offset += label.length;
-      }
-      this.writeUint8(0);
-    }
-    finish(): Buffer { return this.buf.subarray(0, this.offset); }
-  })();
-  
-  encoder.writeUint16(0xDEAD);
-  encoder.writeUint16(0x0100);
-  encoder.writeUint16(1);
-  encoder.writeUint16(0);
-  encoder.writeUint16(0);
-  encoder.writeUint16(0);
-  encoder.writeDomainName(name);
-  encoder.writeUint16(type);
-  encoder.writeUint16(1);
-  return encoder.finish();
-}
+function createMockReqRes(method: string, url: string, headers: Record<string, string> = {}) {
+  const req: any = {
+    method,
+    url,
+    headers,
+    socket: { remoteAddress: "127.0.0.1" },
+    destroy: () => {}
+  };
 
-function parseResponseFlags(buf: Buffer): { qr: number; rcode: number } {
-  const flags = buf.readUInt16BE(2);
-  const qr = (flags >> 15) & 0x1;
-  const rcode = flags & 0xf;
-  return { qr, rcode };
-}
+  let statusCode = 0;
+  let endData: any = null;
+  const resHeaders: Record<string, string | number | readonly string[]> = {};
 
-describe("Modern DNS Protocols (DoH and DoT)", () => {
-  let handler: DnsHandler;
-  const dotPort = 64853;
-  const dohPort = 64443;
-  const dnsPort = 64053;
-
-  // Minimal self-signed cert generation for testing boundaries
-  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-  });
-  
-  // Note: For a strictly functional test without full x509 cert generation logic, 
-  // we mock the TLS block to bypass strict validation in the Node runtime, 
-  // or use a pre-generated fixture. The handler binds TLS correctly, but 
-  // client verification needs to be disabled.
-
-  const config: ServerConfig = {
-    port: dnsPort,
-    dotPort: dotPort,
-    dohPort: dohPort,
-    tls: {
-      key: privateKey,
-      cert: privateKey // Will throw on deep verification, fine for structural boundary tests
+  const res: any = {
+    writeHead: (code: number, headers?: any) => {
+      statusCode = code;
+      if (headers) Object.assign(resHeaders, headers);
     },
-    hosts: {
-      "secure.loop": { records: [{ type: "A", address: "10.0.0.1" }] }
+    end: (data?: any) => {
+      endData = data;
     }
   };
 
-  it("safely binds DoT and DoH boundaries without crashing", async () => {
-    const server = new DevDnsServer(config);
-    handler = new DnsHandler(server, config);
-    try {
-      // Due to the fake cert, start() might throw TLS errors if tightly coupled.
-      // We wrap to ensure the logic path executes safely.
-      await handler.start().catch(() => {});
-    } finally {
-      await handler.stop();
-    }
-    assert.ok(true);
-  });
-  
-  it("rejects malformed DoH requests", async () => {
-    // Validates the internal HTTP request parser for DoH
-    // This logic is tested directly on the handler object using mocks
-    const server = new DevDnsServer(config);
-    handler = new DnsHandler(server, config);
-    const mockReq: any = {
-      method: "POST",
-      url: "/dns-query",
-      headers: { "content-type": "text/plain" }, // Invalid content type
-      socket: { remoteAddress: "127.0.0.1" }
-    };
+  return { req, res, getStatus: () => statusCode, getEndData: () => endData, getHeaders: () => resHeaders };
+}
+
+describe("Modern DNS Protocols (DoH)", () => {
+  const config: ServerConfig = {
+    port: 53,
+    hosts: {}
+  };
+
+  const server = new DevDnsServer(config);
+  const handler = new DnsHandler(server, config);
+
+  it("rejects DoH request on invalid path", async () => {
+    const { req, res, getStatus } = createMockReqRes("GET", "/invalid-path");
     
-    let statusCode = 0;
-    const mockRes: any = {
-      writeHead: (code: number) => { statusCode = code; },
-      end: () => {}
+    // @ts-ignore - Accessing private method for strict L7 unit testing
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 404);
+  });
+
+  it("rejects DoH GET request missing dns query parameter", async () => {
+    const { req, res, getStatus } = createMockReqRes("GET", "/dns-query");
+    
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 400);
+  });
+
+  it("rejects DoH GET request with invalid base64url payload", async () => {
+    const { req, res, getStatus } = createMockReqRes("GET", "/dns-query?dns=!!!invalid_base64!!!");
+    
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 400);
+  });
+
+  it("rejects DoH POST request with invalid content-type", async () => {
+    const { req, res, getStatus } = createMockReqRes("POST", "/dns-query", {
+      "content-type": "application/json"
+    });
+    
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 415);
+  });
+
+  it("rejects unsupported HTTP methods", async () => {
+    const { req, res, getStatus } = createMockReqRes("PUT", "/dns-query");
+    
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 405);
+  });
+
+  it("rejects payloads that are too short to be valid DNS packets", async () => {
+    const { req, res, getStatus } = createMockReqRes("GET", "/dns-query?dns=abcd"); 
+    
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 400);
+  });
+
+  it("enforces memory bounds on DoH POST payloads to prevent exhaustion", async () => {
+    const { req, res, getStatus } = createMockReqRes("POST", "/dns-query", {
+      "content-type": "application/dns-message"
+    });
+
+    const oversizedBuffer = Buffer.alloc(65 * 1024); // Exceeds MAX_TCP_BUFFER_SIZE (64KB)
+
+    req[Symbol.asyncIterator] = async function* () {
+      yield oversizedBuffer;
     };
 
-    // @ts-ignore - access private method for deterministic testing
-    await handler.handleDohRequest(mockReq, mockRes);
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
     
-    assert.strictEqual(statusCode, 415); // Unsupported Media Type
+    assert.strictEqual(getStatus(), 413);
+  });
+
+  it("processes a structurally valid DoH POST request", async () => {
+    const { req, res, getStatus, getHeaders } = createMockReqRes("POST", "/dns-query", {
+      "content-type": "application/dns-message"
+    });
+
+    // Create a minimal 12-byte valid DNS header
+    const validDnsHeader = Buffer.alloc(12);
+    validDnsHeader.writeUInt16BE(0x1234, 0); // ID
+    validDnsHeader.writeUInt16BE(0x0100, 2); // Flags (Standard Query)
+    validDnsHeader.writeUInt16BE(0x0000, 4); // QDCOUNT
+
+    req[Symbol.asyncIterator] = async function* () {
+      yield validDnsHeader;
+    };
+
+    // @ts-ignore
+    await handler.handleDohRequest(req, res);
+    
+    assert.strictEqual(getStatus(), 200);
+    const headers = getHeaders();
+    assert.strictEqual(headers["Content-Type"], "application/dns-message");
+    assert.strictEqual(headers["Cache-Control"], "max-age=0");
   });
 });

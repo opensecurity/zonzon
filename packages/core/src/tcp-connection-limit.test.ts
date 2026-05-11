@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
-import assert from "assert";
-import * as net from "net";
+import assert from "node:assert";
+import * as net from "node:net";
 
 let PORT_BASE = 61500;
 

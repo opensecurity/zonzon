@@ -1,5 +1,5 @@
 import { z } from "zod";
-import * as net from "net";
+import * as net from "node:net";
 import { HostConfig, DnsRecord, ServerConfig } from "./types.js";
 
 const CrlfFreeString = z.string().max(8192).refine((val) => !/[\r\n]/.test(val), "Contains CR/LF");
