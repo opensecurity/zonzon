@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "description": "core routing, dns, and firewall engine",
   "type": "module",
+  "author": "Lucian BLETAN <neuraluc@gmail.com>",
+  "license": "Apache-2.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "repository": {
@@ -10,6 +12,13 @@
     "url": "git+https://github.com/opensecurity/zonzon.git",
     "directory": "packages/core"
   },
+  "homepage": "https://github.com/opensecurity/zonzon/tree/main/packages/core#readme",
+  "keywords": [
+    "dns",
+    "firewall",
+    "proxy",
+    "zero-trust"
+  ],
   "publishConfig": {
     "access": "public"
   },

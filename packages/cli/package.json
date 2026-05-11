@@ -1,15 +1,29 @@
 {
   "name": "@opensecurity/zonzon-cli",
   "version": "0.1.0",
-  "description": "CLI entry point and orchestrator",
+  "description": "Command line interface and entrypoint for zonzon",
   "type": "module",
-  "main": "./dist/cli.js",
+  "author": "Lucian BLETAN <neuraluc@gmail.com>",
+  "license": "Apache-2.0",
   "bin": {
     "zonzon": "./dist/cli.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opensecurity/zonzon.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/opensecurity/zonzon/tree/main/packages/cli#readme",
+  "keywords": [
+    "cli",
+    "server",
+    "daemon"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -b",
-    "dev": "tsx watch src/cli.ts start",
     "start": "node ./dist/cli.js start"
   },
   "dependencies": {

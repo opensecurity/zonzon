@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "description": "dynamic configuration api for the core engine",
   "type": "module",
+  "author": "Lucian BLETAN <neuraluc@gmail.com>",
+  "license": "Apache-2.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "repository": {
@@ -10,6 +12,12 @@
     "url": "git+https://github.com/opensecurity/zonzon.git",
     "directory": "packages/control-plane"
   },
+  "homepage": "https://github.com/opensecurity/zonzon/tree/main/packages/control-plane#readme",
+  "keywords": [
+    "api",
+    "configuration",
+    "control-plane"
+  ],
   "publishConfig": {
     "access": "public"
   },

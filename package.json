@@ -5,7 +5,27 @@
   "description": "DNS and HTTP Proxy Infrastructure",
   "type": "module",
   "author": "Lucian BLETAN <neuraluc@gmail.com>",
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opensecurity/zonzon.git"
+  },
+  "homepage": "https://github.com/opensecurity/zonzon#readme",
+  "bugs": {
+    "url": "https://github.com/opensecurity/zonzon/issues"
+  },
+  "keywords": [
+    "zero-trust",
+    "dns",
+    "proxy",
+    "security",
+    "firewall",
+    "sni",
+    "infrastructure"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "workspaces": [
     "packages/*"
   ],
