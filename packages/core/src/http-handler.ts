@@ -198,8 +198,7 @@ export class HttpHandler {
       method: reqMethod,
       headers: outReqHeaders,
       timeout: this.idleTimeoutMs,
-      servername: targetUrl.protocol === "https:" ? hostname : undefined,
-      rejectUnauthorized: false
+      servername: targetUrl.protocol === "https:" ? hostname : undefined
     };
 
     const requestModule = targetUrl.protocol === "https:" ? https : http;
@@ -230,6 +229,30 @@ export class HttpHandler {
     proxyResp.pipe(res);
   }
 
+  private async readRequestBodySafe(req: IncomingMessage, maxBytes: number, clientIp: string): Promise<Buffer | undefined> {
+    const chunks: Buffer[] = [];
+    let totalSize = 0;
+
+    const absoluteTimeout = setTimeout(() => {
+      req.destroy(new Error("Read absolute timeout exceeded (Slowloris Mitigation)"));
+    }, 10000);
+
+    try {
+      for await (const chunk of req) {
+        totalSize += chunk.length;
+        if (totalSize > maxBytes) {
+          clearTimeout(absoluteTimeout);
+          throw new Error("Payload size limit exceeded");
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      clearTimeout(absoluteTimeout);
+    }
+
+    return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+  }
+
   private async handleForwardProxy(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const clientIp = req.socket.remoteAddress || "unknown";
     const reqMethod = req.method || "GET";
@@ -249,26 +272,18 @@ export class HttpHandler {
     }
 
     const targetIp = validatedIps[0];
-
     const maxBodyBytes = 5 * 1024 * 1024;
     let bodyBuffer: Buffer | undefined = undefined;
 
     if (reqMethod !== "GET" && reqMethod !== "HEAD") {
-      const chunks: Buffer[] = [];
-      let totalSize = 0;
-      for await (const chunk of req) {
-        totalSize += chunk.length;
-        if (totalSize > maxBodyBytes) {
-          audit.http(clientIp, reqMethod, hostname, reqUrl, 413, targetUrl.hostname);
-          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-          res.end("<h1>413 Payload Too Large</h1>");
-          req.destroy();
-          return;
-        }
-        chunks.push(chunk);
-      }
-      if (chunks.length > 0) {
-        bodyBuffer = Buffer.concat(chunks);
+      try {
+        bodyBuffer = await this.readRequestBodySafe(req, maxBodyBytes, clientIp);
+      } catch (readErr: any) {
+        audit.http(clientIp, reqMethod, hostname, reqUrl, 413, targetUrl.hostname);
+        res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+        res.end("<h1>413 Payload Too Large / Read Fault</h1>");
+        if (!req.destroyed) req.destroy();
+        return;
       }
     }
 
@@ -387,21 +402,14 @@ export class HttpHandler {
           let bodyBuffer: Buffer | undefined = undefined;
 
           if (reqMethod !== "GET" && reqMethod !== "HEAD") {
-            const chunks: Buffer[] = [];
-            let totalSize = 0;
-            for await (const chunk of req) {
-              totalSize += chunk.length;
-              if (totalSize > maxBodyBytes) {
-                audit.http(clientIp, reqMethod, hostname, reqUrl, 413, upstreamBase.hostname);
-                res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-                res.end("<h1>413 Payload Too Large</h1>");
-                req.destroy();
-                return;
-              }
-              chunks.push(chunk);
-            }
-            if (chunks.length > 0) {
-              bodyBuffer = Buffer.concat(chunks);
+            try {
+              bodyBuffer = await this.readRequestBodySafe(req, maxBodyBytes, clientIp);
+            } catch (readErr: any) {
+              audit.http(clientIp, reqMethod, hostname, reqUrl, 413, upstreamBase.hostname);
+              res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+              res.end("<h1>413 Payload Too Large / Read Fault</h1>");
+              if (!req.destroyed) req.destroy();
+              return;
             }
           }
 
@@ -460,20 +468,14 @@ export class HttpHandler {
       
       let bodyBuffer: Buffer | undefined = undefined;
       if (reqMethod !== "GET" && reqMethod !== "HEAD") {
-        const chunks: Buffer[] = [];
-        let totalSize = 0;
-        for await (const chunk of req) {
-          totalSize += chunk.length;
-          if (totalSize > (this.config.hosts[hostname]?.http_proxy?.maxRequestBodyBytes ?? 5242880)) {
-             res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-             res.end("<h1>413 Payload Too Large</h1>");
-             req.destroy();
-             return;
-          }
-          chunks.push(chunk);
-        }
-        if (chunks.length > 0) {
-          bodyBuffer = Buffer.concat(chunks);
+        const maxBodyBytes = this.config.hosts[hostname]?.http_proxy?.maxRequestBodyBytes ?? 5242880;
+        try {
+          bodyBuffer = await this.readRequestBodySafe(req, maxBodyBytes, clientIp);
+        } catch (readErr: any) {
+          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+          res.end("<h1>413 Payload Too Large / Read Fault</h1>");
+          if (!req.destroyed) req.destroy();
+          return;
         }
       }
 

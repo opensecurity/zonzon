@@ -24,7 +24,7 @@ export class FirewallEngine {
     if (normPattern === normDomain) return true;
     if (normPattern.startsWith("*.")) {
       const suffix = normPattern.slice(2);
-      return normDomain === suffix || normDomain.endsWith("." + suffix);
+      return normDomain.endsWith("." + suffix);
     }
     return false;
   }

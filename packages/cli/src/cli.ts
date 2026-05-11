@@ -23,6 +23,7 @@ const CLI_VERSION = pkg.version;
 
 const CONFIG_DIR = path.join(os.homedir(), ".zonzon");
 const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+const DEFAULT_SOCK_PATH = path.join(os.tmpdir(), "zonzon-cp.sock");
 
 function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
@@ -113,7 +114,7 @@ async function handleInit(configPath: string, isJson: boolean): Promise<void> {
     tcpIdleTimeoutMs: 30000,
     controlPlane: {
       enabled: true,
-      port: 8080
+      socketPath: DEFAULT_SOCK_PATH
     },
     firewall: {
       defaultPolicy: "deny",
@@ -265,9 +266,11 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
 
     const blindIndexSalt = randomBytes(16).toString("hex");
     const cpPort = config.controlPlane?.port || 8080;
+    const socketPath = config.controlPlane?.socketPath || DEFAULT_SOCK_PATH;
 
     controlPlane = new ControlPlane({
       port: cpPort,
+      socketPath: socketPath,
       apiKey: activeApiKey,
       blindIndexSalt: blindIndexSalt,
       initialConfig: config,

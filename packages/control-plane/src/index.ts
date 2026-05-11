@@ -1,10 +1,12 @@
 import * as http from "http";
+import * as fs from "node:fs";
 import { ServerConfig, audit } from "@opensecurity/zonzon-core";
 import { ConfigService } from "./domain/config/config.service.js";
 import { ConfigHandler } from "./domain/config/config.handler.js";
 
 export interface ControlPlaneOptions {
-  port: number;
+  port?: number;
+  socketPath?: string;
   apiKey: string;
   blindIndexSalt: string;
   initialConfig: ServerConfig;
@@ -41,10 +43,21 @@ export class ControlPlane {
 
       this.server.on("error", reject);
 
-      this.server.listen(this.options.port, "127.0.0.1", () => {
-        audit.system(`Control Plane locked strictly to loopback interface on port ${this.options.port}`);
-        resolve();
-      });
+      if (this.options.socketPath) {
+        if (fs.existsSync(this.options.socketPath)) {
+          fs.unlinkSync(this.options.socketPath);
+        }
+        this.server.listen(this.options.socketPath, () => {
+          fs.chmodSync(this.options.socketPath!, 0o600);
+          audit.system(`Control Plane locked strictly to Unix Domain Socket at ${this.options.socketPath}`);
+          resolve();
+        });
+      } else {
+        this.server.listen(this.options.port || 8080, "127.0.0.1", () => {
+          audit.system(`Control Plane locked strictly to loopback interface on port ${this.options.port || 8080}`);
+          resolve();
+        });
+      }
     });
   }
 

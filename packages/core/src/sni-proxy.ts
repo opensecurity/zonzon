@@ -134,12 +134,12 @@ export class SniProxyService {
 
         const targetIp = targetIps[0];
         
-        if (firewallEngine.evaluateIp(targetIp, this.config.firewall) === "DENY") {
-          throw new Error(`Target IP ${targetIp} blocked by Firewall policy`);
+        if (firewallEngine.isRestrictedOutbound(targetIp)) {
+          throw new Error(`Target IP ${targetIp} blocked by Strict SSRF proxy policy`);
         }
 
-        if (firewallEngine.evaluateOutbound(targetIp, this.config.firewall) === "DENY") {
-          throw new Error(`Target IP ${targetIp} blocked by SSRF policy`);
+        if (firewallEngine.evaluateIp(targetIp, this.config.firewall) === "DENY") {
+          throw new Error(`Target IP ${targetIp} blocked by Firewall policy`);
         }
 
         audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 200, `Tunneled to ${targetIp}`);

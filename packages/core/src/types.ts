@@ -77,6 +77,7 @@ export interface FirewallConfig {
 export interface ControlPlaneConfig {
   enabled?: boolean;
   port?: number;
+  socketPath?: string;
   apiKey?: string;
 }
 
