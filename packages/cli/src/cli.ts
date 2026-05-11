@@ -5,6 +5,7 @@ import * as path from "path";
 import * as os from "os";
 import { parseArgs } from "util";
 import { randomBytes } from "crypto";
+import { createRequire } from "module";
 import {
   DevDnsServer,
   DnsHandler,
@@ -15,6 +16,10 @@ import {
   audit
 } from "@opensecurity/zonzon-core";
 import { ControlPlane } from "@opensecurity/zonzon-control-plane";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json");
+const CLI_VERSION = pkg.version;
 
 const CONFIG_DIR = path.join(os.homedir(), ".zonzon");
 const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
@@ -68,7 +73,7 @@ function setDeepValue(obj: any, pathStr: string, value: any): void {
 
 function printUsage(): void {
   console.log(`
-zonzon core engine (v0.1.0)
+zonzon core engine (v${CLI_VERSION})
 Usage: zonzon <command> [options]
 
 Commands:
