@@ -5,7 +5,6 @@ import * as path from "path";
 import * as os from "os";
 import { parseArgs } from "util";
 import { randomBytes } from "crypto";
-import * as yaml from "js-yaml";
 import {
   DevDnsServer,
   DnsHandler,
@@ -18,7 +17,7 @@ import {
 import { ControlPlane } from "@opensecurity/zonzon-control-plane";
 
 const CONFIG_DIR = path.join(os.homedir(), ".zonzon");
-const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, "config.yaml");
+const DEFAULT_CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
 function ensureConfigDir() {
   if (!fs.existsSync(CONFIG_DIR)) {
@@ -32,7 +31,7 @@ function loadConfig(configPath: string): any {
   }
   try {
     const fileContents = fs.readFileSync(configPath, "utf8");
-    return yaml.load(fileContents) || {};
+    return JSON.parse(fileContents) || {};
   } catch (err: any) {
     audit.error(`Failed to parse configuration file at ${configPath}: ${err.message}`);
     process.exit(1);
@@ -42,8 +41,8 @@ function loadConfig(configPath: string): any {
 function saveConfig(configPath: string, data: any): void {
   ensureConfigDir();
   try {
-    const yamlStr = yaml.dump(data, { indent: 2, noRefs: true });
-    fs.writeFileSync(configPath, yamlStr, { encoding: "utf8", mode: 0o600 });
+    const jsonStr = JSON.stringify(data, null, 2);
+    fs.writeFileSync(configPath, jsonStr, { encoding: "utf8", mode: 0o600 });
   } catch (err: any) {
     audit.error(`Failed to write configuration file at ${configPath}: ${err.message}`);
     process.exit(1);
@@ -73,7 +72,7 @@ zonzon core engine (v0.1.0)
 Usage: zonzon <command> [options]
 
 Commands:
-  init        Initialize the default configuration file at ~/.zonzon/config.yaml
+  init        Initialize the default configuration file at ~/.zonzon/config.json
   start       Boot the routing engine and control plane
   config      Manage configuration state
 
@@ -84,7 +83,7 @@ Config Commands:
                                        Example: zonzon config set controlPlane.port 8081
 
 Global Options:
-  --config, -c   Override path to configuration file (default: ~/.zonzon/config.yaml)
+  --config, -c   Override path to configuration file (default: ~/.zonzon/config.json)
   `);
   process.exit(0);
 }

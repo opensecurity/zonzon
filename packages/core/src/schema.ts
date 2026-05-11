@@ -68,10 +68,17 @@ const FirewallSchema = z.object({
   blocklist_ips: z.array(z.string().max(40)).default([]),
 });
 
+const ControlPlaneSchema = z.object({
+  enabled: z.boolean().default(true).optional(),
+  port: z.coerce.number().int().min(1).max(65535).default(8080).optional(),
+  apiKey: z.string().optional()
+});
+
 const ServerConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(53),
   fallbackDns: Ipv4Schema.optional(),
   firewall: FirewallSchema.optional(),
+  controlPlane: ControlPlaneSchema.optional(),
   dnsCacheMaxSize: z.coerce.number().int().min(1).max(100000).default(1024),
   dnsCacheTtlMs: z.coerce.number().int().min(0).max(3600000).default(0),
   maxTcpConnections: z.coerce.number().int().min(1).max(10000).default(100),

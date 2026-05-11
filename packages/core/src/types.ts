@@ -74,10 +74,17 @@ export interface FirewallConfig {
   blocklist_ips?: string[];
 }
 
+export interface ControlPlaneConfig {
+  enabled?: boolean;
+  port?: number;
+  apiKey?: string;
+}
+
 export interface ServerConfig {
   port: number;
   fallbackDns?: string;
   firewall?: FirewallConfig;
+  controlPlane?: ControlPlaneConfig;
   dnsCacheMaxSize?: number;
   dnsCacheTtlMs?: number;
   maxTcpConnections?: number;
