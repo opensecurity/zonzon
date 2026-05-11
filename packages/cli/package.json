@@ -1,7 +1,7 @@
 {
   "name": "@opensecurity/zonzon-cli",
-  "version": "0.1.2",
-  "description": "Command line interface and entrypoint for zonzon",
+  "version": "0.1.3",
+  "description": "cli interface for zonzon",
   "type": "module",
   "author": "Lucian BLETAN <neuraluc@gmail.com>",
   "license": "Apache-2.0",
@@ -22,12 +22,16 @@
   "publishConfig": {
     "access": "public"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b",
-    "start": "node ./dist/cli.js start"
+    "start": "node dist/cli.js",
+    "dev": "tsx watch src/cli.ts"
   },
   "dependencies": {
-    "@opensecurity/zonzon-core": "*",
-    "@opensecurity/zonzon-control-plane": "*"
+    "@opensecurity/zonzon-core": "^0.1.3",
+    "@opensecurity/zonzon-control-plane": "^0.1.3"
   }
 }
