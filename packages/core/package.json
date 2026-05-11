@@ -1,6 +1,6 @@
 {
   "name": "@opensecurity/zonzon-core",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "core routing, dns, and firewall engine",
   "type": "module",
   "author": "Lucian BLETAN <neuraluc@gmail.com>",
