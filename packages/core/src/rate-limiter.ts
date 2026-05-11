@@ -1,6 +1,7 @@
 export interface RateLimiterOptions {
   maxRequests: number;
   windowMs: number;
+  maxTrackedIps?: number;
 }
 
 interface IpBucket {
@@ -12,9 +13,11 @@ export class RateLimiter {
   private options: RateLimiterOptions;
   private buckets = new Map<string, IpBucket>();
   private gcInterval: NodeJS.Timeout;
+  private maxTrackedIps: number;
 
   constructor(options: RateLimiterOptions) {
     this.options = options;
+    this.maxTrackedIps = options.maxTrackedIps ?? 100000;
     
     this.gcInterval = setInterval(() => this.garbageCollect(), Math.max(options.windowMs * 2, 60000));
     this.gcInterval.unref();
@@ -39,6 +42,12 @@ export class RateLimiter {
     let bucket = this.buckets.get(ip);
 
     if (!bucket || now >= bucket.resetTime) {
+      if (this.buckets.size >= this.maxTrackedIps) {
+        const firstKey = this.buckets.keys().next().value;
+        if (firstKey !== undefined) {
+          this.buckets.delete(firstKey);
+        }
+      }
       bucket = { count: 1, resetTime: now + this.options.windowMs };
       this.buckets.set(ip, bucket);
       return true;

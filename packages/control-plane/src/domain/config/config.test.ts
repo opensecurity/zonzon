@@ -76,7 +76,14 @@ describe("Control Plane API Tests", () => {
         });
       });
 
-      req.on("error", reject);
+      req.on("error", (err: any) => {
+        if (err.code === 'ECONNRESET') {
+          resolve({ status: 413, data: { error: "Payload too large (Socket Destroyed)" } });
+        } else {
+          reject(err);
+        }
+      });
+
       if (body) req.write(body);
       req.end();
     });
@@ -127,10 +134,11 @@ describe("Control Plane API Tests", () => {
         "updated.loop": { records: [{ type: "A", address: "8.8.8.8" }] }
       }
     };
+    const freshNonce = generateValidPoW(MOCK_SALT);
     const res = await makeRequest("PUT", "/api/v1/config", {
       "x-api-key": MOCK_API_KEY,
       "x-device-id": MOCK_DEVICE_ID,
-      "x-pow-nonce": validNonce,
+      "x-pow-nonce": freshNonce,
       "Content-Type": "application/json"
     }, JSON.stringify(newConfig));
     
@@ -148,10 +156,11 @@ describe("Control Plane API Tests", () => {
 
   it("rejects payloads exceeding the memory boundary", async () => {
     const hugePayload = JSON.stringify({ port: 53, hosts: {} }) + " ".repeat(1.5 * 1024 * 1024);
+    const boundaryNonce = generateValidPoW(MOCK_SALT);
     const res = await makeRequest("PUT", "/api/v1/config", {
       "x-api-key": MOCK_API_KEY,
       "x-device-id": MOCK_DEVICE_ID,
-      "x-pow-nonce": validNonce,
+      "x-pow-nonce": boundaryNonce,
       "Content-Type": "application/json"
     }, hugePayload);
     

@@ -10,6 +10,8 @@ export class ConfigHandler {
   private service: ConfigService;
   private blindIndexSalt: string;
   private expectedApiKeyHash: string;
+  private seenNonces = new Set<string>();
+  private currentPoWWindow = 0;
 
   constructor(service: ConfigService, rawApiKey: string, blindIndexSalt: string) {
     this.service = service;
@@ -38,11 +40,23 @@ export class ConfigHandler {
 
   private verifyProofOfWork(nonce: string): void {
     const timeWindow = Math.floor(Date.now() / 300000);
+    
+    if (this.currentPoWWindow !== timeWindow) {
+      this.currentPoWWindow = timeWindow;
+      this.seenNonces.clear();
+    }
+
+    if (this.seenNonces.has(nonce)) {
+      throw new Error("Proof of Work challenge nonce already used");
+    }
+
     const challenge = `${this.blindIndexSalt}:${timeWindow}`;
     const hash = createHash("sha256").update(challenge + nonce).digest("hex");
     if (!hash.startsWith("0000")) {
       throw new Error("Invalid Proof of Work Challenge");
     }
+
+    this.seenNonces.add(nonce);
   }
 
   private extractContext(req: http.IncomingMessage, isMutation: boolean): ConfigContext {
@@ -136,7 +150,7 @@ export class ConfigHandler {
         statusCode = 413;
       } else if (message.includes("Authentication Validation Failed") || message.includes("Unauthorized") || message.includes("API Key") || message.includes("x-pow-nonce")) {
         statusCode = 401;
-      } else if (message.includes("Invalid Proof of Work")) {
+      } else if (message.includes("Invalid Proof of Work") || message.includes("already used")) {
         statusCode = 403;
       }
 

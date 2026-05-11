@@ -74,6 +74,12 @@ export class HttpHandler {
 
   private getCircuitBreaker(upstream: string): ProxyCircuitBreaker {
     if (!this.circuitBreakers.has(upstream)) {
+      if (this.circuitBreakers.size >= 10000) {
+        const firstKey = this.circuitBreakers.keys().next().value;
+        if (firstKey !== undefined) {
+          this.circuitBreakers.delete(firstKey);
+        }
+      }
       this.circuitBreakers.set(upstream, new ProxyCircuitBreaker());
     }
     return this.circuitBreakers.get(upstream)!;
