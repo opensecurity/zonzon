@@ -65,6 +65,61 @@
         "code": 302,
         "target": "https://github.com/archive/main"
       }
+    },
+    "test-records.loop": {
+      "records": [
+        {
+          "type": "A",
+          "address": "10.0.0.1"
+        },
+        {
+          "type": "AAAA",
+          "address": "2001:db8::1"
+        },
+        {
+          "type": "TXT",
+          "data": [
+            "v=spf1 -all",
+            "zonzon-test-string"
+          ]
+        },
+        {
+          "type": "MX",
+          "priority": 10,
+          "exchange": "mail.test-records.loop"
+        },
+        {
+          "type": "NS",
+          "target": "ns1.test-records.loop"
+        }
+      ]
+    },
+    "cname.test-records.loop": {
+      "records": [
+        {
+          "type": "CNAME",
+          "target": "test-records.loop"
+        }
+      ]
+    },
+    "_sip._tcp.test-records.loop": {
+      "records": [
+        {
+          "type": "SRV",
+          "priority": 10,
+          "weight": 5,
+          "port": 5060,
+          "target": "sip.test-records.loop"
+        }
+      ]
+    },
+    "53.0.20.172.in-addr.arpa": {
+      "records": [
+        {
+          "type": "PTR",
+          "target": "zonzon.sandbox.local"
+        }
+      ]
     }
   }
 }

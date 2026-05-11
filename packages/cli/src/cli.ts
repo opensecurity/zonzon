@@ -149,7 +149,6 @@ async function handleConfig(configPath: string, args: string[], isJson: boolean)
     
     const fileContents = fs.readFileSync(configPath, "utf8");
     if (isJson) {
-      // Print raw JSON string on a single line for jq consumption
       console.log(JSON.stringify(JSON.parse(fileContents)));
     } else {
       console.log(fileContents);

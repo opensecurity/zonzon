@@ -1,6 +1,6 @@
 {
   "name": "@opensecurity/zonzon-control-plane",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "dynamic configuration api for the core engine",
   "type": "module",
   "author": "Lucian BLETAN <neuraluc@gmail.com>",
@@ -28,7 +28,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@opensecurity/zonzon-core": "^0.1.4",
+    "@opensecurity/zonzon-core": "^0.1.5",
     "zod": "^3.24.2"
   }
 }

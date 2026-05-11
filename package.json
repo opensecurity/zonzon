@@ -1,6 +1,6 @@
 {
   "name": "@opensecurity/zonzon-mono",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "DNS and HTTP Proxy Infrastructure",
   "type": "module",
@@ -36,7 +36,10 @@
     "dev": "npm run build && npm run dev:watch --workspace=@opensecurity/zonzon-cli",
     "docker:up": "docker compose up",
     "docker:build": "docker build -t zonzon .",
-    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo tsconfig.tsbuildinfo"
+    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo tsconfig.tsbuildinfo",
+    "bump:patch": "node scripts/bump.js patch && npm install",
+    "bump:minor": "node scripts/bump.js minor && npm install",
+    "bump:major": "node scripts/bump.js major && npm install"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

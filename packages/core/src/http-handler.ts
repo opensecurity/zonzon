@@ -178,7 +178,14 @@ export class HttpHandler {
         outReqHeaders[k] = Array.isArray(v) ? v.join(", ") : v;
       }
     }
+    
     outReqHeaders["Host"] = hostname;
+
+    if (bodyBuffer) {
+      outReqHeaders["content-length"] = String(bodyBuffer.length);
+    } else if (reqMethod !== "GET" && reqMethod !== "HEAD") {
+      outReqHeaders["content-length"] = "0";
+    }
 
     for (const [k, v] of Object.entries(customReqHeaders)) {
       outReqHeaders[k] = v;
@@ -410,7 +417,7 @@ export class HttpHandler {
             originalHostname,
             reqMethod,
             req.headers,
-            bodyBuffer,
+            shouldForwardBody ? bodyBuffer : undefined,
             clientIp,
             res,
             breaker,
