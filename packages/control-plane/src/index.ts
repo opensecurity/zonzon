@@ -8,6 +8,7 @@ export interface ControlPlaneOptions {
   apiKey: string;
   blindIndexSalt: string;
   initialConfig: ServerConfig;
+  configFilePath: string;
 }
 
 export class ControlPlane {
@@ -17,7 +18,7 @@ export class ControlPlane {
 
   constructor(options: ControlPlaneOptions) {
     this.options = options;
-    this.service = new ConfigService(options.initialConfig);
+    this.service = new ConfigService(options.initialConfig, options.configFilePath);
   }
 
   public subscribe(callback: (config: ServerConfig) => void): void {

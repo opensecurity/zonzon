@@ -1,3 +1,5 @@
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
 import { ServerConfig, validateServerConfig, audit } from "@opensecurity/zonzon-core";
 import { getContext } from "./context.js";
 
@@ -25,11 +27,13 @@ class PessimisticLock {
 
 export class ConfigService {
   private config: ServerConfig;
+  private configFilePath: string;
   private lock = new PessimisticLock();
   private subscribers: Array<(config: ServerConfig) => void> = [];
 
-  constructor(initialConfig: ServerConfig) {
+  constructor(initialConfig: ServerConfig, configFilePath: string) {
     this.config = validateServerConfig(initialConfig);
+    this.configFilePath = path.resolve(configFilePath);
   }
 
   public subscribe(callback: (config: ServerConfig) => void): void {
@@ -53,7 +57,13 @@ export class ConfigService {
     await this.lock.acquire();
     try {
       const validatedConfig = validateServerConfig(rawConfig);
+      
+      const tempPath = `${this.configFilePath}.tmp.${Date.now()}`;
+      await fs.writeFile(tempPath, JSON.stringify(validatedConfig, null, 2), { mode: 0o600, encoding: "utf8" });
+      await fs.rename(tempPath, this.configFilePath);
+
       this.config = validatedConfig;
+
       for (const callback of this.subscribers) {
         try {
           callback(this.config);

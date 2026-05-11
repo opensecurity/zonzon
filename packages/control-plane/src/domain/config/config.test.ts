@@ -2,6 +2,9 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import * as http from "http";
 import * as net from "net";
+import * as os from "node:os";
+import * as path from "node:path";
+import { promises as fs } from "node:fs";
 import { createHash } from "crypto";
 import { ConfigService } from "./config.service.js";
 import { ConfigHandler } from "./config.handler.js";
@@ -11,16 +14,19 @@ const MOCK_SALT = "test-salt-1234567890";
 const MOCK_API_KEY = "test-api-key-very-long-and-secure-32-chars";
 const MOCK_DEVICE_ID = "test-device-id-1234";
 
+let globalNonceCounter = 0;
+
 function generateValidPoW(salt: string): string {
-  let nonce = 0;
   const timeWindow = Math.floor(Date.now() / 300000);
   const challenge = `${salt}:${timeWindow}`;
   while (true) {
-    const hash = createHash("sha256").update(challenge + nonce.toString()).digest("hex");
+    const hash = createHash("sha256").update(challenge + globalNonceCounter.toString()).digest("hex");
     if (hash.startsWith("0000")) {
-      return nonce.toString();
+      const validNonce = globalNonceCounter.toString();
+      globalNonceCounter++;
+      return validNonce;
     }
-    nonce++;
+    globalNonceCounter++;
   }
 }
 
@@ -28,6 +34,7 @@ describe("Control Plane API Tests", () => {
   let server: http.Server;
   let port: number;
   let validNonce: string;
+  let tempConfigPath: string;
 
   const initialConfig: ServerConfig = {
     port: 53,
@@ -37,8 +44,11 @@ describe("Control Plane API Tests", () => {
   };
 
   before(async () => {
+    tempConfigPath = path.join(os.tmpdir(), `hosts-test-${Date.now()}.json`);
+    await fs.writeFile(tempConfigPath, JSON.stringify(initialConfig), { mode: 0o600 });
+
     validNonce = generateValidPoW(MOCK_SALT);
-    const service = new ConfigService(initialConfig);
+    const service = new ConfigService(initialConfig, tempConfigPath);
     const handler = new ConfigHandler(service, MOCK_API_KEY, MOCK_SALT);
 
     server = http.createServer((req, res) => handler.handleRequest(req, res));
@@ -50,8 +60,11 @@ describe("Control Plane API Tests", () => {
     });
   });
 
-  after(() => {
+  after(async () => {
     server.close();
+    try {
+      await fs.unlink(tempConfigPath);
+    } catch {}
   });
 
   function makeRequest(method: string, path: string, headers: Record<string, string>, body?: string): Promise<{ status: number, data: any }> {
@@ -127,7 +140,7 @@ describe("Control Plane API Tests", () => {
     assert.ok(res.data.error.includes("Invalid Proof of Work"));
   });
 
-  it("accepts PUT requests with valid configuration and PoW", async () => {
+  it("accepts PUT requests with valid configuration and PoW, and writes to disk", async () => {
     const newConfig: ServerConfig = {
       port: 5353,
       hosts: {
@@ -152,6 +165,11 @@ describe("Control Plane API Tests", () => {
     assert.strictEqual(checkRes.status, 200);
     assert.strictEqual(checkRes.data.port, 5353);
     assert.ok("updated.loop" in checkRes.data.hosts);
+
+    const diskContent = await fs.readFile(tempConfigPath, "utf8");
+    const parsedDisk = JSON.parse(diskContent);
+    assert.strictEqual(parsedDisk.port, 5353);
+    assert.ok("updated.loop" in parsedDisk.hosts);
   });
 
   it("rejects payloads exceeding the memory boundary", async () => {
