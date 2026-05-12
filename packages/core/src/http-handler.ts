@@ -107,6 +107,7 @@ export class HttpHandler {
 
     const [hostname, portStr] = targetUrl.split(':');
     const port = portStr ? parseInt(portStr, 10) : 443;
+    let srvSocket: net.Socket | null = null;
 
     try {
       const validatedIps = await this.proxyService.validateTargetFirewall(`https://${hostname}:${port}`, this.config.firewall);
@@ -116,27 +117,36 @@ export class HttpHandler {
 
       clientSocket.setTimeout(this.idleTimeoutMs);
       clientSocket.on("timeout", () => {
-        audit.error(`CONNECT Client tunnel idle timeout reached for ${clientIp}`);
         clientSocket.destroy();
+        if (srvSocket && !srvSocket.destroyed) {
+          srvSocket.destroy();
+        }
       });
 
-      const srvSocket = net.connect(port, targetIp, () => {
+      srvSocket = net.connect(port, targetIp, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head && head.length > 0) {
-          srvSocket.write(head);
+          srvSocket!.write(head);
         }
-        srvSocket.pipe(clientSocket);
-        clientSocket.pipe(srvSocket);
+        srvSocket!.pipe(clientSocket);
+        clientSocket.pipe(srvSocket!);
       });
 
       srvSocket.setTimeout(this.idleTimeoutMs);
       srvSocket.on("timeout", () => {
-        audit.error(`CONNECT Upstream tunnel idle timeout reached for ${hostname}:${port}`);
-        srvSocket.destroy();
+        srvSocket!.destroy();
+        if (!clientSocket.destroyed) {
+          clientSocket.destroy();
+        }
       });
 
       this.activeConnections.add(srvSocket);
-      srvSocket.on('close', () => this.activeConnections.delete(srvSocket));
+      srvSocket.on('close', () => {
+        this.activeConnections.delete(srvSocket!);
+        if (!clientSocket.destroyed) {
+          clientSocket.destroy();
+        }
+      });
 
       srvSocket.on('error', (err) => {
         audit.error(`Upstream tunnel fault on ${hostname}:${port} - ${err.message}`);
@@ -144,7 +154,11 @@ export class HttpHandler {
       });
 
       clientSocket.on('error', (err) => {
-        if (!srvSocket.destroyed) srvSocket.destroy();
+        if (srvSocket && !srvSocket.destroyed) srvSocket.destroy();
+      });
+
+      clientSocket.on('close', () => {
+        if (srvSocket && !srvSocket.destroyed) srvSocket.destroy();
       });
 
     } catch (err: any) {
@@ -437,18 +451,32 @@ export class HttpHandler {
         }
       }
 
-      if (firewallEngine.evaluateDomain(hostname, this.config.firewall) === "DENY") {
-         audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by Domain Firewall");
-         res.writeHead(403);
-         res.end("Forbidden");
-         return;
+      const isLiteralIp = net.isIP(hostname) !== 0;
+
+      if (isLiteralIp) {
+        if (firewallEngine.evaluateIp(hostname, this.config.firewall) === "DENY") {
+           audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by IP Firewall");
+           res.writeHead(403);
+           res.end("Forbidden");
+           return;
+        }
+      } else {
+        if (firewallEngine.evaluateDomain(hostname, this.config.firewall) === "DENY") {
+           audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by Domain Firewall");
+           res.writeHead(403);
+           res.end("Forbidden");
+           return;
+        }
       }
 
-      const records = await dns.resolve(hostname);
-      const targetIps = records.filter(ip => typeof ip === "string");
-      if (targetIps.length === 0) throw new Error("NXDOMAIN");
+      let targetIp = hostname;
 
-      const targetIp = targetIps[0];
+      if (!isLiteralIp) {
+        const records = await dns.resolve(hostname);
+        const targetIps = records.filter(ip => typeof ip === "string");
+        if (targetIps.length === 0) throw new Error("NXDOMAIN");
+        targetIp = targetIps[0];
+      }
 
       if (firewallEngine.evaluateIp(targetIp, this.config.firewall) === "DENY") {
          audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by IP Firewall");

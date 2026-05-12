@@ -82,8 +82,10 @@ export class SniProxyService {
 
     clientSocket.setTimeout(this.idleTimeoutMs);
     clientSocket.on("timeout", () => {
-      audit.error(`SNI Client tunnel idle timeout reached for ${clientIp}`);
       clientSocket.destroy();
+      if (upstreamSocket && !upstreamSocket.destroyed) {
+        upstreamSocket.destroy();
+      }
     });
 
     const absoluteHandshakeTimeout = setTimeout(() => {
@@ -152,13 +154,18 @@ export class SniProxyService {
 
         upstreamSocket.setTimeout(this.idleTimeoutMs);
         upstreamSocket.on("timeout", () => {
-          audit.error(`SNI Upstream tunnel idle timeout reached for ${sni}:${targetIp}`);
           upstreamSocket!.destroy();
+          if (!clientSocket.destroyed) {
+            clientSocket.destroy();
+          }
         });
 
         this.activeConnections.add(upstreamSocket);
         upstreamSocket.on("close", () => {
           this.activeConnections.delete(upstreamSocket!);
+          if (!clientSocket.destroyed) {
+            clientSocket.destroy();
+          }
         });
 
         upstreamSocket.on("error", (err) => {
