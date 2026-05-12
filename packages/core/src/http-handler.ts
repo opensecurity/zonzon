@@ -193,7 +193,7 @@ export class HttpHandler {
       }
     }
     
-    outReqHeaders["Host"] = hostname;
+    outReqHeaders["Host"] = targetUrl.host;
 
     if (bodyBuffer) {
       outReqHeaders["content-length"] = String(bodyBuffer.length);
@@ -340,7 +340,16 @@ export class HttpHandler {
     }
 
     const rawHost = req.headers.host || "";
-    const hostname = rawHost.split(":")[0];
+    let hostname = rawHost;
+    
+    if (rawHost.startsWith("[")) {
+      const closingIdx = rawHost.indexOf("]");
+      if (closingIdx !== -1) {
+        hostname = rawHost.substring(1, closingIdx);
+      }
+    } else {
+      hostname = rawHost.split(":")[0];
+    }
 
     try {
       if (!hostname) {
@@ -492,7 +501,7 @@ export class HttpHandler {
         return;
       }
 
-      const targetUrl = new URL(reqUrl, `http://${hostname}`);
+      const targetUrl = new URL(reqUrl, `http://${rawHost}`);
       
       let bodyBuffer: Buffer | undefined = undefined;
       if (reqMethod !== "GET" && reqMethod !== "HEAD") {
