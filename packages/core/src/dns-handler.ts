@@ -4,7 +4,8 @@ import * as tls from "node:tls";
 import * as https from "node:https";
 import * as http from "node:http";
 import { randomBytes } from "node:crypto";
-import { DevDnsServer, DnsWireFormat, extractQuestions, apply0x20Encoding } from "./dns-service.js";
+import { DevDnsServer, DnsWireFormat, extractQuestions, apply0x20Encoding, appendEdns0DoBit } from "./dns-service.js";
+import { DnssecValidator } from "./dnssec.js";
 import { ServerConfig, DNS_RCODE } from "./types.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { audit } from "./audit.js";
@@ -168,7 +169,7 @@ export class DnsHandler {
       const dotServer = tls.createServer({
         cert: this.config.tls.cert,
         key: this.config.tls.key,
-        minVersion: "TLSv1.2"
+        minVersion: "TLSv1.3"
       }, (socket: tls.TLSSocket) => {
         if (this.activeTcpConnections.size >= this.maxTcpConnections) {
           socket.destroy();
@@ -206,7 +207,7 @@ export class DnsHandler {
       const dohServer = https.createServer({
         cert: this.config.tls.cert,
         key: this.config.tls.key,
-        minVersion: "TLSv1.2"
+        minVersion: "TLSv1.3"
       }, (req, res) => {
         this.handleDohRequest(req, res).catch(() => {
           if (!res.headersSent) {
@@ -288,6 +289,8 @@ export class DnsHandler {
       }
 
       const { query: encodedQuery, expectedNames } = apply0x20Encoding(query);
+      const dnssecQuery = appendEdns0DoBit(encodedQuery);
+      
       const fwdSocket = dgram.createSocket("udp4");
       
       const timeoutId = setTimeout(() => {
@@ -298,6 +301,12 @@ export class DnsHandler {
       fwdSocket.on("message", (msg) => {
         clearTimeout(timeoutId);
         try { fwdSocket.close(); } catch {}
+
+        if (!DnssecValidator.verifyResponse(msg)) {
+          audit.error(`Dropped upstream DoH fallback response: DNSSEC signature validation failed`);
+          resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
+          return;
+        }
 
         const responseQuestions = extractQuestions(msg);
         let valid0x20 = expectedNames.length === responseQuestions.length;
@@ -343,7 +352,7 @@ export class DnsHandler {
       });
 
       fwdSocket.bind(0, "0.0.0.0", () => {
-        fwdSocket.send(encodedQuery, 0, encodedQuery.length, 53, this.fallbackDns);
+        fwdSocket.send(dnssecQuery, 0, dnssecQuery.length, 53, this.fallbackDns);
       });
     });
   }
@@ -448,6 +457,8 @@ export class DnsHandler {
 
     const { query: encodedQuery, expectedNames } = apply0x20Encoding(data);
     encodedQuery.writeUInt16BE(ephemeralId, 0);
+    
+    const dnssecQuery = appendEdns0DoBit(encodedQuery);
 
     const fwdSocket = dgram.createSocket("udp4");
     
@@ -468,6 +479,11 @@ export class DnsHandler {
       if (msg.length < 2) return;
       const responseId = msg.readUInt16BE(0);
       if (responseId !== ephemeralId) return;
+
+      if (!DnssecValidator.verifyResponse(msg)) {
+        audit.error(`Dropped upstream UDP response: DNSSEC signature validation failed`);
+        return;
+      }
 
       const responseQuestions = extractQuestions(msg);
       let valid0x20 = expectedNames.length === responseQuestions.length;
@@ -517,7 +533,7 @@ export class DnsHandler {
     });
 
     fwdSocket.bind(0, "0.0.0.0", () => {
-      fwdSocket.send(encodedQuery, 0, encodedQuery.length, 53, this.fallbackDns);
+      fwdSocket.send(dnssecQuery, 0, dnssecQuery.length, 53, this.fallbackDns);
     });
   }
 
@@ -554,11 +570,12 @@ export class DnsHandler {
     if (!this.fallbackDns) return;
 
     const { query: encodedQuery, expectedNames } = apply0x20Encoding(query);
+    const dnssecQuery = appendEdns0DoBit(encodedQuery);
 
     const fwd = net.createConnection(53, this.fallbackDns, () => {
-      const prefixed = Buffer.alloc(2 + encodedQuery.length);
-      prefixed.writeUInt16BE(encodedQuery.length, 0);
-      encodedQuery.copy(prefixed, 2);
+      const prefixed = Buffer.alloc(2 + dnssecQuery.length);
+      prefixed.writeUInt16BE(dnssecQuery.length, 0);
+      dnssecQuery.copy(prefixed, 2);
       fwd.write(prefixed);
     });
 
@@ -571,6 +588,12 @@ export class DnsHandler {
       if (data.length < 2) return;
       const resp = data.subarray(2);
       
+      if (!DnssecValidator.verifyResponse(resp)) {
+        audit.error(`Dropped upstream TCP response: DNSSEC signature validation failed`);
+        fwd.destroy();
+        return;
+      }
+
       const responseQuestions = extractQuestions(resp);
       let valid0x20 = expectedNames.length === responseQuestions.length;
       for (let i = 0; i < expectedNames.length; i++) {

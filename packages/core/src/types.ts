@@ -151,11 +151,17 @@ export const DNS_TYPES = {
   NS: 2,
   CNAME: 5,
   SOA: 6,
+  PTR: 12,
   MX: 15,
   TXT: 16,
-  PTR: 12,
   AAAA: 28,
   SRV: 33,
+  OPT: 41,
+  DS: 43,
+  RRSIG: 46,
+  NSEC: 47,
+  DNSKEY: 48,
+  NSEC3: 50,
 } as const;
 
 export const DNS_OPCODE = {
@@ -179,6 +185,8 @@ export const RESPONSE_FLAGS = {
   TC: (1 << 9) as number,
   RD: (1 << 8) as number,
   RA: (1 << 7) as number,
+  AD: (1 << 5) as number,
+  CD: (1 << 4) as number,
 };
 
 export const MAX_DNS_PACKET_SIZE = 512;

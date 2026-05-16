@@ -216,6 +216,25 @@ export function extractQuestions(query: Buffer): ParsedQuestion[] {
   return questions;
 }
 
+export function appendEdns0DoBit(query: Buffer): Buffer {
+  if (query.length < 12) return query;
+  
+  const arcount = query.readUInt16BE(10);
+  if (arcount > 0) return query;
+
+  const encoder = new DnsWireFormat();
+  encoder.writeBytes(query);
+  encoder.buf.writeUInt16BE(1, 10); 
+
+  encoder.writeUint8(0); 
+  encoder.writeUint16(DNS_TYPES.OPT); 
+  encoder.writeUint16(4096); 
+  encoder.writeUint32(0x00008000); 
+  encoder.writeUint16(0); 
+
+  return encoder.finish();
+}
+
 export function apply0x20Encoding(originalQuery: Buffer): { query: Buffer, expectedNames: string[] } {
   const query = Buffer.from(originalQuery);
   if (query.length < 12) return { query, expectedNames: [] };
