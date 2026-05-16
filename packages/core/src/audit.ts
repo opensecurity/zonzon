@@ -20,6 +20,14 @@ export class AuditLogger {
     return String(input || "").replace(/[\r\n\t]/g, " ").replace(/[^\x20-\x7E]/g, "?");
   }
 
+  private getHumanTime(): string {
+    const now = new Date();
+    const h = String(now.getHours()).padStart(2, "0");
+    const m = String(now.getMinutes()).padStart(2, "0");
+    const s = String(now.getSeconds()).padStart(2, "0");
+    return `${h}:${m}:${s}`;
+  }
+
   public setJsonMode(enable: boolean): void {
     this.useJson = enable;
   }
@@ -53,10 +61,9 @@ export class AuditLogger {
     
     if (this.isTestEnv) return;
     
-    const ts = new Date().toISOString();
     if (this.useJson) {
       console.log(JSON.stringify({
-        timestamp: ts,
+        timestamp: new Date().toISOString(),
         level: "INFO",
         component: "DNS",
         ip,
@@ -65,10 +72,18 @@ export class AuditLogger {
         cached
       }));
     } else {
-      const codeMap: any = { 0: "Found (NOERROR)", 3: "Not Found (NXDOMAIN)", 5: "Blocked by Firewall (REFUSED)" };
-      const prefix = cached ? "[Cached] " : "";
+      const codeMap: any = { 
+        0: "allowed", 
+        1: "format error", 
+        2: "server failure", 
+        3: "domain not found", 
+        5: "refused by firewall" 
+      };
+      const prefix = cached ? "cached " : "";
+      const clock = this.getHumanTime();
       questions.forEach(q => {
-        console.log(`[${ts}] [DNS] ${this.sanitize(ip)} | ${prefix}${REVERSE_DNS_TYPES[q.type] || q.type} ${this.sanitize(q.name)} -> ${codeMap[rcode] || rcode}`);
+        const typeStr = (REVERSE_DNS_TYPES[q.type] || q.type).toString().toLowerCase();
+        console.log(`[${clock}] [dns] ${this.sanitize(ip)} requested ${prefix}${typeStr} record for ${this.sanitize(q.name)} -> ${codeMap[rcode] || rcode}`);
       });
     }
   }
@@ -78,10 +93,9 @@ export class AuditLogger {
     
     if (this.isTestEnv) return;
     
-    const ts = new Date().toISOString();
     if (this.useJson) {
       console.log(JSON.stringify({
-        timestamp: ts,
+        timestamp: new Date().toISOString(),
         level: action === "DENY" ? "WARN" : "INFO",
         component: "FIREWALL",
         action,
@@ -90,8 +104,9 @@ export class AuditLogger {
         detail
       }));
     } else {
-      const color = action === "ALLOW" ? "\x1b[32mALLOW\x1b[0m" : "\x1b[31mDENY\x1b[0m";
-      console.log(`[${ts}] [FIREWALL] ${this.sanitize(ip)} | ${color} | ${this.sanitize(target)} ${detail ? `(${this.sanitize(detail)})` : ""}`);
+      const status = action === "ALLOW" ? "passed" : "blocked";
+      const extra = detail ? ` due to ${detail.toLowerCase()}` : "";
+      console.log(`[${this.getHumanTime()}] [firewall] connection from ${this.sanitize(ip)} targeting ${this.sanitize(target)} was ${status}${extra}`);
     }
   }
 
@@ -101,10 +116,9 @@ export class AuditLogger {
 
     if (this.isTestEnv) return;
     
-    const ts = new Date().toISOString();
     if (this.useJson) {
       console.log(JSON.stringify({
-        timestamp: ts,
+        timestamp: new Date().toISOString(),
         level: status >= 400 ? "WARN" : "INFO",
         component: "HTTP",
         ip,
@@ -115,7 +129,8 @@ export class AuditLogger {
         target
       }));
     } else {
-      console.log(`[${ts}] [HTTP] ${this.sanitize(ip)} | Returned Status ${status} | ${this.sanitize(method)} ${this.sanitize(host)}${this.sanitize(path)} ${target ? `-> ${this.sanitize(target)}` : ""}`);
+      const routeInfo = target ? `forwarded to ${this.sanitize(target)}` : "processed natively";
+      console.log(`[${this.getHumanTime()}] [http] ${this.sanitize(ip)} | ${this.sanitize(method)} ${this.sanitize(host)}${this.sanitize(path)} status ${status} | ${routeInfo}`);
     }
   }
 
@@ -123,16 +138,15 @@ export class AuditLogger {
     this.metrics.system_events++;
     if (this.isTestEnv) return;
     
-    const ts = new Date().toISOString();
     if (this.useJson) {
       console.log(JSON.stringify({
-        timestamp: ts,
+        timestamp: new Date().toISOString(),
         level: "INFO",
         component: "SYSTEM",
         message: msg
       }));
     } else {
-      console.log(`[${ts}] [SYSTEM] ${this.sanitize(msg)}`);
+      console.log(`[${this.getHumanTime()}] [system] ${this.sanitize(msg).toLowerCase()}`);
     }
   }
   
@@ -140,16 +154,15 @@ export class AuditLogger {
     this.metrics.errors++;
     if (this.isTestEnv) return;
     
-    const ts = new Date().toISOString();
     if (this.useJson) {
       console.error(JSON.stringify({
-        timestamp: ts,
+        timestamp: new Date().toISOString(),
         level: "ERROR",
         component: "SYSTEM",
         message: msg
       }));
     } else {
-      console.error(`[${ts}] [ERROR] \x1b[31m${this.sanitize(msg)}\x1b[0m`);
+      console.error(`[${this.getHumanTime()}] [error] ${this.sanitize(msg).toLowerCase()}`);
     }
   }
 }

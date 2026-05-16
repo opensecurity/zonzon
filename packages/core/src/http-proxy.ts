@@ -2,6 +2,7 @@ import * as net from "node:net";
 import * as dns from "node:dns/promises";
 import { HostConfig, ProxiedRequest, ModifiedHeaders, FirewallConfig, ServerConfig } from "./types.js";
 import { firewallEngine } from "./firewall.js";
+import { decryptSecret } from "./crypto.js";
 
 export class HttpProxyService {
   async resolveHost(hostname: string, config: ServerConfig): Promise<string[]> {
@@ -90,7 +91,8 @@ export class HttpProxyService {
     }
 
     for (const [key, value] of Object.entries(config.http_proxy.headers)) {
-      const sanitized = this.sanitizeHeader(value);
+      const decryptedValue = decryptSecret(value);
+      const sanitized = this.sanitizeHeader(decryptedValue);
       if (sanitized) {
         result.upstreamHeaders[key] = sanitized;
         result.clientResponseHeaders[key] = sanitized;

@@ -74,17 +74,32 @@ export class ConfigHandler {
 
     const validatedHeaders = parsed.data;
 
-    const providedKey = validatedHeaders["x-api-key"] || "";
-    if (!providedKey) {
+    const providedKeyStr = validatedHeaders["x-api-key"] || "";
+    if (!providedKeyStr) {
       throw new Error("Missing API Key");
     }
 
+    const providedKeyBuf = Buffer.alloc(providedKeyStr.length);
+    providedKeyBuf.write(providedKeyStr, "utf8");
+
     const apiKeySecret = hkdfSync("sha256", this.blindIndexSalt, Buffer.alloc(0), "api_key_derivation", 32);
-    const providedHash = createHmac("sha256", Buffer.from(apiKeySecret)).update(providedKey).digest("hex");
+    const providedHash = createHmac("sha256", Buffer.from(apiKeySecret)).update(providedKeyBuf).digest("hex");
+    
+    providedKeyBuf.fill(0);
+    if (req.headers["x-api-key"]) {
+      req.headers["x-api-key"] = "";
+      delete req.headers["x-api-key"];
+    }
+
     const expectedBuffer = Buffer.from(this.expectedApiKeyHash, "utf8");
     const providedBuffer = Buffer.from(providedHash, "utf8");
 
-    if (expectedBuffer.length !== providedBuffer.length || !timingSafeEqual(expectedBuffer, providedBuffer)) {
+    const isValid = expectedBuffer.length === providedBuffer.length && timingSafeEqual(expectedBuffer, providedBuffer);
+    
+    expectedBuffer.fill(0);
+    providedBuffer.fill(0);
+
+    if (!isValid) {
       throw new Error("Unauthorized Access");
     }
 

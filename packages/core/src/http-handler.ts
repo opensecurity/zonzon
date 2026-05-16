@@ -64,6 +64,41 @@ export class HttpHandler {
   private activeConnections = new Set<net.Socket>();
   private idleTimeoutMs: number;
 
+  private readonly fingerprintHeadersToScrub = [
+    // core servers & infrastructure proxies
+    "server",
+    "via",
+    "x-source",
+    "x-powered-by",
+    "x-generator",
+    
+    // cdn, reverse proxy, & cloud service trackers
+    "cf-ray",
+    "cf-cache-status",
+    "x-cache",
+    "x-cache-lookup",
+    "x-drupal-cache",
+    "x-varnish",
+    "x-nextjs-cache",
+    "x-fastly-request-id",
+    
+    // programming language runtimes & versions
+    "x-runtime",
+    "x-version",
+    "x-impl",
+    
+    // microsoft enterprise ecosystem markers
+    "x-aspnet-version",
+    "x-aspnetmvc-version",
+    "microsoftofficewebserver",
+    "x-powered-by-plesk",
+    
+    // open source content management configurations
+    "x-pingback",
+    "wp-super-cache",
+    "x-ghost-version"
+  ];
+
   constructor(dnsServer: DevDnsServer, config: ServerConfig, port?: number) {
     this.dnsServer = dnsServer;
     this.proxyService = new HttpProxyService();
@@ -248,7 +283,8 @@ export class HttpHandler {
 
     const outResHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(proxyResp.headers)) {
-      if (!hopByHop.includes(k.toLowerCase()) && v !== undefined) {
+      const lowerKey = k.toLowerCase();
+      if (!hopByHop.includes(lowerKey) && !this.fingerprintHeadersToScrub.includes(lowerKey) && v !== undefined) {
         outResHeaders[k] = Array.isArray(v) ? v.join(", ") : v;
       }
     }

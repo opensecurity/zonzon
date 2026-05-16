@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { ServerConfig, validateServerConfig, audit } from "@opensecurity/zonzon-core";
+import { ServerConfig, validateServerConfig, audit, encryptSecret, isEncrypted } from "@opensecurity/zonzon-core";
 import { getContext } from "./context.js";
 
 class PessimisticLock {
@@ -58,6 +58,16 @@ export class ConfigService {
     try {
       const validatedConfig = validateServerConfig(rawConfig);
       
+      for (const host of Object.values(validatedConfig.hosts)) {
+        if (host.http_proxy && host.http_proxy.headers) {
+          for (const [key, value] of Object.entries(host.http_proxy.headers)) {
+            if (!isEncrypted(value)) {
+              host.http_proxy.headers[key] = encryptSecret(value);
+            }
+          }
+        }
+      }
+
       const tempPath = `${this.configFilePath}.tmp.${Date.now()}`;
       await fs.writeFile(tempPath, JSON.stringify(validatedConfig, null, 2), { mode: 0o600, encoding: "utf8" });
       await fs.rename(tempPath, this.configFilePath);

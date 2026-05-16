@@ -10,6 +10,7 @@ services:
     environment:
       - ZONZON_PORT=53
       - ZONZON_FALLBACK_DNS=1.1.1.1
+      - ZONZON_MASTER_KEY=01 # openssl rand -hex 32
     restart: unless-stopped
     command: ["start", "--config", "/app/config/hosts.json"]
     networks:
