@@ -216,6 +216,46 @@ export function extractQuestions(query: Buffer): ParsedQuestion[] {
   return questions;
 }
 
+export function apply0x20Encoding(originalQuery: Buffer): { query: Buffer, expectedNames: string[] } {
+  const query = Buffer.from(originalQuery);
+  if (query.length < 12) return { query, expectedNames: [] };
+
+  const qdcount = query.readUInt16BE(4);
+  let offset = 12;
+
+  for (let i = 0; i < qdcount; i++) {
+    while (offset < query.length) {
+      const len = query[offset];
+      if (len === 0) { 
+         offset++; 
+         break; 
+      }
+      if ((len & 0xc0) === 0xc0) { 
+         offset += 2; 
+         break; 
+      }
+      
+      offset++;
+      for (let j = 0; j < len; j++) {
+        if (offset + j >= query.length) break;
+        let charCode = query[offset + j];
+        if ((charCode >= 0x41 && charCode <= 0x5a) || (charCode >= 0x61 && charCode <= 0x7a)) {
+          if (Math.random() > 0.5) charCode |= 0x20;
+          else charCode &= ~0x20;
+          query[offset + j] = charCode;
+        }
+      }
+      offset += len;
+    }
+    if (offset + 4 <= query.length) {
+      offset += 4;
+    }
+  }
+  
+  const expectedNames = extractQuestions(query).map(q => q.name);
+  return { query, expectedNames };
+}
+
 function buildResponsePacket(
   id: number,
   flags: number,

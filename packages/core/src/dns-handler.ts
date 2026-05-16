@@ -4,7 +4,7 @@ import * as tls from "node:tls";
 import * as https from "node:https";
 import * as http from "node:http";
 import { randomBytes } from "node:crypto";
-import { DevDnsServer, DnsWireFormat, extractQuestions } from "./dns-service.js";
+import { DevDnsServer, DnsWireFormat, extractQuestions, apply0x20Encoding } from "./dns-service.js";
 import { ServerConfig, DNS_RCODE } from "./types.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { audit } from "./audit.js";
@@ -287,7 +287,9 @@ export class DnsHandler {
         return;
       }
 
+      const { query: encodedQuery, expectedNames } = apply0x20Encoding(query);
       const fwdSocket = dgram.createSocket("udp4");
+      
       const timeoutId = setTimeout(() => {
         try { fwdSocket.close(); } catch {}
         resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
@@ -296,6 +298,21 @@ export class DnsHandler {
       fwdSocket.on("message", (msg) => {
         clearTimeout(timeoutId);
         try { fwdSocket.close(); } catch {}
+
+        const responseQuestions = extractQuestions(msg);
+        let valid0x20 = expectedNames.length === responseQuestions.length;
+        for (let i = 0; i < expectedNames.length; i++) {
+          if (responseQuestions[i]?.name !== expectedNames[i]) {
+            valid0x20 = false;
+            break;
+          }
+        }
+
+        if (!valid0x20) {
+          audit.error(`Dropped upstream DoH fallback response: 0x20 bit encoding mismatch (Spoofing Mitigation)`);
+          resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
+          return;
+        }
         
         const ips = this.parseResolvedIpv4s(msg);
         let blockedIp = null;
@@ -325,7 +342,9 @@ export class DnsHandler {
         resolve(this.server.generateErrorResponse(query, DNS_RCODE.SERVFAIL));
       });
 
-      fwdSocket.send(query, 0, query.length, 53, this.fallbackDns);
+      fwdSocket.bind(0, "0.0.0.0", () => {
+        fwdSocket.send(encodedQuery, 0, encodedQuery.length, 53, this.fallbackDns);
+      });
     });
   }
 
@@ -427,6 +446,9 @@ export class DnsHandler {
     const ephemeralId = randomBytes(2).readUInt16BE(0);
     const trackingId = randomBytes(4).readUInt32BE(0);
 
+    const { query: encodedQuery, expectedNames } = apply0x20Encoding(data);
+    encodedQuery.writeUInt16BE(ephemeralId, 0);
+
     const fwdSocket = dgram.createSocket("udp4");
     
     const timeoutId = setTimeout(() => {
@@ -446,6 +468,20 @@ export class DnsHandler {
       if (msg.length < 2) return;
       const responseId = msg.readUInt16BE(0);
       if (responseId !== ephemeralId) return;
+
+      const responseQuestions = extractQuestions(msg);
+      let valid0x20 = expectedNames.length === responseQuestions.length;
+      for (let i = 0; i < expectedNames.length; i++) {
+        if (responseQuestions[i]?.name !== expectedNames[i]) {
+          valid0x20 = false;
+          break;
+        }
+      }
+
+      if (!valid0x20) {
+        audit.error(`Dropped upstream UDP response: 0x20 bit encoding mismatch (Spoofing Mitigation)`);
+        return;
+      }
 
       const restoredMsg = Buffer.from(msg);
       restoredMsg.writeUInt16BE(originalId, 0);
@@ -480,10 +516,9 @@ export class DnsHandler {
       try { fwdSocket.close(); } catch {}
     });
 
-    const queryToForward = Buffer.from(data);
-    queryToForward.writeUInt16BE(ephemeralId, 0);
-
-    fwdSocket.send(queryToForward, 0, queryToForward.length, 53, this.fallbackDns);
+    fwdSocket.bind(0, "0.0.0.0", () => {
+      fwdSocket.send(encodedQuery, 0, encodedQuery.length, 53, this.fallbackDns);
+    });
   }
 
   private handleUdpMessage(data: Buffer, rinfo: RemoteInfo): void {
@@ -518,10 +553,12 @@ export class DnsHandler {
   private forwardTcpQuery(query: Buffer, clientSocket: net.Socket | tls.TLSSocket, peerAddr: string): void {
     if (!this.fallbackDns) return;
 
+    const { query: encodedQuery, expectedNames } = apply0x20Encoding(query);
+
     const fwd = net.createConnection(53, this.fallbackDns, () => {
-      const prefixed = Buffer.alloc(2 + query.length);
-      prefixed.writeUInt16BE(query.length, 0);
-      query.copy(prefixed, 2);
+      const prefixed = Buffer.alloc(2 + encodedQuery.length);
+      prefixed.writeUInt16BE(encodedQuery.length, 0);
+      encodedQuery.copy(prefixed, 2);
       fwd.write(prefixed);
     });
 
@@ -534,6 +571,21 @@ export class DnsHandler {
       if (data.length < 2) return;
       const resp = data.subarray(2);
       
+      const responseQuestions = extractQuestions(resp);
+      let valid0x20 = expectedNames.length === responseQuestions.length;
+      for (let i = 0; i < expectedNames.length; i++) {
+        if (responseQuestions[i]?.name !== expectedNames[i]) {
+          valid0x20 = false;
+          break;
+        }
+      }
+
+      if (!valid0x20) {
+        audit.error(`Dropped upstream TCP response: 0x20 bit encoding mismatch (Spoofing Mitigation)`);
+        fwd.destroy();
+        return;
+      }
+
       const ips = this.parseResolvedIpv4s(resp);
       let blockedIp = null;
       
