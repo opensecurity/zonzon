@@ -1,16 +1,42 @@
 import * as net from "node:net";
 import * as dns from "node:dns/promises";
-import { HostConfig, ProxiedRequest, ModifiedHeaders, FirewallConfig } from "./types.js";
+import { HostConfig, ProxiedRequest, ModifiedHeaders, FirewallConfig, ServerConfig } from "./types.js";
 import { firewallEngine } from "./firewall.js";
 
 export class HttpProxyService {
-  async validateTargetFirewall(targetUrl: string, fw?: FirewallConfig): Promise<string[]> {
+  async resolveHost(hostname: string, config: ServerConfig): Promise<string[]> {
+    const normalizedName = hostname.toLowerCase().replace(/\.$/, "");
+    
+    let hostConfig = config.hosts[normalizedName];
+    if (!hostConfig) {
+      const labels = normalizedName.split(".");
+      for (let i = 0; i < labels.length - 1; i++) {
+        const wildcardKey = "*." + labels.slice(i).join(".");
+        if (config.hosts[wildcardKey]) {
+          hostConfig = config.hosts[wildcardKey];
+          break;
+        }
+      }
+    }
+
+    if (hostConfig && hostConfig.records) {
+      const ips = hostConfig.records
+        .filter(r => r.type === "A" || r.type === "AAAA")
+        .map(r => (r as any).address);
+      if (ips.length > 0) return ips;
+    }
+
+    const records = await dns.resolve(hostname);
+    return records.filter(ip => typeof ip === "string") as string[];
+  }
+
+  async validateTargetFirewall(targetUrl: string, config: ServerConfig): Promise<string[]> {
     const parsed = new URL(targetUrl);
     const host = parsed.hostname;
     const isLiteralIp = net.isIP(host) !== 0;
 
-    if (fw && !isLiteralIp) {
-      if (firewallEngine.evaluateDomain(host, fw) === "DENY") {
+    if (config.firewall && !isLiteralIp) {
+      if (firewallEngine.evaluateDomain(host, config.firewall) === "DENY") {
         throw new Error(`Domain Blocked: '${host}'`);
       }
     }
@@ -21,8 +47,7 @@ export class HttpProxyService {
       targetIps = [host];
     } else {
       try {
-        const records = await dns.resolve(host);
-        targetIps = records.filter(ip => typeof ip === 'string') as string[];
+        targetIps = await this.resolveHost(host, config);
       } catch {
         throw new Error(`Resolution Fault: '${host}'`);
       }
@@ -33,12 +58,12 @@ export class HttpProxyService {
     }
 
     for (const ip of targetIps) {
-      if (firewallEngine.evaluateOutbound(ip, fw) === "DENY") {
+      if (firewallEngine.evaluateOutbound(ip, config.firewall) === "DENY") {
         throw new Error(`Restricted IP: (${ip})`);
       }
       
-      if (fw) {
-        if (firewallEngine.evaluateIp(ip, fw) === "DENY") {
+      if (config.firewall) {
+        if (firewallEngine.evaluateIp(ip, config.firewall) === "DENY") {
           throw new Error(`IP Blocked: ${ip}`);
         }
       }
@@ -74,13 +99,20 @@ export class HttpProxyService {
 
     result.clientResponseHeaders["X-Proxy"] = "zonzon";
 
-    if (config.http_proxy.forwardRequestBody && originalRequest.body) {
-      const maxBodyBytes = config.http_proxy.maxRequestBodyBytes ?? 5 * 1024 * 1024;
-      if (originalRequest.body.length <= maxBodyBytes) {
-        result.upstreamHeaders["X-Body-Forwarded"] = "true";
-        result.upstreamHeaders["X-Body-Size"] = String(originalRequest.body.length);
+    if (config.http_proxy.forwardRequestBody) {
+      if (originalRequest.body) {
+        const maxBodyBytes = config.http_proxy.maxRequestBodyBytes ?? 5 * 1024 * 1024;
+        if (originalRequest.body.length <= maxBodyBytes) {
+          result.upstreamHeaders["X-Body-Forwarded"] = "true";
+          result.upstreamHeaders["X-Body-Size"] = String(originalRequest.body.length);
+        } else {
+          throw new Error(`Payload Limit Exceeded`);
+        }
       } else {
-        throw new Error(`Payload Limit Exceeded`);
+        result.upstreamHeaders["X-Body-Forwarded"] = "true";
+        if (originalRequest.headers["content-length"]) {
+          result.upstreamHeaders["X-Body-Size"] = originalRequest.headers["content-length"];
+        }
       }
     }
 

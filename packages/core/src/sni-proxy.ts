@@ -127,8 +127,39 @@ export class SniProxyService {
           throw new Error("Domain blocked by Firewall policy");
         }
 
-        const records = await dns.resolve(sni);
-        const targetIps = records.filter(ip => typeof ip === "string");
+        let targetIps: string[] = [];
+        const normalizedName = sni.toLowerCase().replace(/\.$/, "");
+        let hostConfig = this.config.hosts[normalizedName];
+        
+        if (!hostConfig) {
+          const labels = normalizedName.split(".");
+          for (let i = 0; i < labels.length - 1; i++) {
+            const wildcardKey = "*." + labels.slice(i).join(".");
+            if (this.config.hosts[wildcardKey]) {
+              hostConfig = this.config.hosts[wildcardKey];
+              break;
+            }
+          }
+        }
+        
+        const portConfig = hostConfig || this.config.hosts["*"];
+
+        if (portConfig && portConfig.tls_proxy && portConfig.tls_proxy.targetIp) {
+          targetIps = [portConfig.tls_proxy.targetIp];
+        } else if (hostConfig && hostConfig.records) {
+          // Explicitly avoid using the "*" catch-all to resolve internal IPs to prevent proxy loops.
+          const internalIps = hostConfig.records
+            .filter(r => r.type === "A" || r.type === "AAAA")
+            .map(r => (r as any).address);
+          if (internalIps.length > 0) {
+            targetIps = internalIps;
+          }
+        }
+
+        if (targetIps.length === 0) {
+          const records = await dns.resolve(sni);
+          targetIps = records.filter(ip => typeof ip === "string");
+        }
 
         if (targetIps.length === 0) {
           throw new Error("NXDOMAIN on upstream resolution");
@@ -136,7 +167,7 @@ export class SniProxyService {
 
         const targetIp = targetIps[0];
         
-        if (firewallEngine.isRestrictedOutbound(targetIp)) {
+        if (firewallEngine.evaluateOutbound(targetIp, this.config.firewall) === "DENY") {
           throw new Error(`Target IP ${targetIp} blocked by Strict SSRF proxy policy`);
         }
 
@@ -144,9 +175,11 @@ export class SniProxyService {
           throw new Error(`Target IP ${targetIp} blocked by Firewall policy`);
         }
 
-        audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 200, `Tunneled to ${targetIp}`);
+        const targetPort = portConfig?.tls_proxy?.targetPort ?? 443;
 
-        upstreamSocket = net.connect(443, targetIp, () => {
+        audit.http(clientIp, "TLS-SNI", sni, `:${this.port}`, 200, `Tunneled to ${targetIp}:${targetPort}`);
+
+        upstreamSocket = net.connect(targetPort, targetIp, () => {
           upstreamSocket!.write(buffer);
           clientSocket.pipe(upstreamSocket!);
           upstreamSocket!.pipe(clientSocket);
@@ -169,7 +202,7 @@ export class SniProxyService {
         });
 
         upstreamSocket.on("error", (err) => {
-          audit.error(`Upstream tunnel fault on ${sni}:443 - ${err.message}`);
+          audit.error(`Upstream tunnel fault on ${sni}:${targetPort} - ${err.message}`);
           if (!clientSocket.destroyed) clientSocket.destroy();
         });
 

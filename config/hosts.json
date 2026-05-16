@@ -14,7 +14,8 @@
       "ubuntu.com",
       "*.github.com",
       "github.com",
-      "*.githubusercontent.com"
+      "*.githubusercontent.com",
+      "*.test.local"
     ],
     "allowlist_ips": [
       "127.0.0.1"
@@ -38,6 +39,23 @@
           "address": "172.20.0.53"
         }
       ]
+    },
+    "secure.test.local": {
+      "records": [
+        {
+          "type": "A",
+          "address": "172.20.0.53"
+        }
+      ],
+      "redirect": {
+        "enabled": true,
+        "code": 301,
+        "target": "https://secure.test.local"
+      },
+      "tls_proxy": {
+        "targetPort": 1234,
+        "targetIp": "172.21.0.100"
+      }
     },
     "mock.ai.loop": {
       "records": [

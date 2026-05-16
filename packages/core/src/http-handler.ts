@@ -2,7 +2,6 @@ import * as http from "node:http";
 import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as net from "node:net";
-import * as dns from "node:dns/promises";
 import { DevDnsServer } from "./dns-service.js";
 import { HttpProxyService } from "./http-proxy.js";
 import { HostConfig, ServerConfig } from "./types.js";
@@ -110,7 +109,7 @@ export class HttpHandler {
     let srvSocket: net.Socket | null = null;
 
     try {
-      const validatedIps = await this.proxyService.validateTargetFirewall(`https://${hostname}:${port}`, this.config.firewall);
+      const validatedIps = await this.proxyService.validateTargetFirewall(`https://${hostname}:${port}`, this.config);
       const targetIp = validatedIps[0];
 
       audit.http(clientIp, "CONNECT", hostname, `:${port}`, 200, `TCP Tunnel Established -> ${targetIp}`);
@@ -176,13 +175,14 @@ export class HttpHandler {
     hostname: string,
     reqMethod: string,
     reqHeaders: http.IncomingHttpHeaders,
-    bodyBuffer: Buffer | undefined,
+    reqStream: IncomingMessage | undefined,
     clientIp: string,
     res: http.ServerResponse,
     breaker: ProxyCircuitBreaker,
     auditUrl: string,
     customReqHeaders: Record<string, string> = {},
-    customResHeaders: Record<string, string> = {}
+    customResHeaders: Record<string, string> = {},
+    maxBodyBytes: number = 5242880
   ): Promise<void> {
     const hopByHop = this.proxyService.getHopByHopHeaders();
     const outReqHeaders: Record<string, string> = {};
@@ -195,8 +195,12 @@ export class HttpHandler {
     
     outReqHeaders["Host"] = targetUrl.host;
 
-    if (bodyBuffer) {
-      outReqHeaders["content-length"] = String(bodyBuffer.length);
+    if (reqStream && reqMethod !== "GET" && reqMethod !== "HEAD") {
+      if (reqHeaders["content-length"]) {
+        outReqHeaders["content-length"] = reqHeaders["content-length"];
+      } else if (reqHeaders["transfer-encoding"]) {
+        outReqHeaders["transfer-encoding"] = reqHeaders["transfer-encoding"];
+      }
     } else if (reqMethod !== "GET" && reqMethod !== "HEAD") {
       outReqHeaders["content-length"] = "0";
     }
@@ -221,10 +225,25 @@ export class HttpHandler {
       const proxyReq = requestModule.request(reqOptions, resolve);
       proxyReq.on("error", reject);
       proxyReq.on("timeout", () => { proxyReq.destroy(); reject(new Error("TimeoutError")); });
-      if (bodyBuffer) {
-        proxyReq.write(bodyBuffer);
+
+      if (reqStream) {
+        let bytesSent = 0;
+        reqStream.on("data", (chunk: Buffer) => {
+          bytesSent += chunk.length;
+          if (bytesSent > maxBodyBytes) {
+            reqStream.removeAllListeners("data");
+            proxyReq.destroy(new Error("Payload size limit exceeded"));
+            reject(new Error("Payload size limit exceeded"));
+          }
+        });
+        reqStream.pipe(proxyReq);
+        reqStream.on("error", (err) => {
+          proxyReq.destroy(err);
+          reject(err);
+        });
+      } else {
+        proxyReq.end();
       }
-      proxyReq.end();
     }));
 
     const outResHeaders: Record<string, string> = {};
@@ -243,30 +262,6 @@ export class HttpHandler {
     proxyResp.pipe(res);
   }
 
-  private async readRequestBodySafe(req: IncomingMessage, maxBytes: number, clientIp: string): Promise<Buffer | undefined> {
-    const chunks: Buffer[] = [];
-    let totalSize = 0;
-
-    const absoluteTimeout = setTimeout(() => {
-      req.destroy(new Error("Read absolute timeout exceeded (Slowloris Mitigation)"));
-    }, 10000);
-
-    try {
-      for await (const chunk of req) {
-        totalSize += chunk.length;
-        if (totalSize > maxBytes) {
-          clearTimeout(absoluteTimeout);
-          throw new Error("Payload size limit exceeded");
-        }
-        chunks.push(chunk);
-      }
-    } finally {
-      clearTimeout(absoluteTimeout);
-    }
-
-    return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-  }
-
   private async handleForwardProxy(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const clientIp = req.socket.remoteAddress || "unknown";
     const reqMethod = req.method || "GET";
@@ -277,7 +272,7 @@ export class HttpHandler {
     let validatedIps: string[] = [];
 
     try {
-      validatedIps = await this.proxyService.validateTargetFirewall(targetUrl.toString(), this.config.firewall);
+      validatedIps = await this.proxyService.validateTargetFirewall(targetUrl.toString(), this.config);
     } catch (fwErr: any) {
       audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 403, "Blocked by L3/L7 Firewall");
       res.writeHead(403, { "Content-Type": "text/html" });
@@ -287,19 +282,7 @@ export class HttpHandler {
 
     const targetIp = validatedIps[0];
     const maxBodyBytes = 5 * 1024 * 1024;
-    let bodyBuffer: Buffer | undefined = undefined;
-
-    if (reqMethod !== "GET" && reqMethod !== "HEAD") {
-      try {
-        bodyBuffer = await this.readRequestBodySafe(req, maxBodyBytes, clientIp);
-      } catch (readErr: any) {
-        audit.http(clientIp, reqMethod, hostname, reqUrl, 413, targetUrl.hostname);
-        res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-        res.end("<h1>413 Payload Too Large / Read Fault</h1>");
-        if (!req.destroyed) req.destroy();
-        return;
-      }
-    }
+    const reqStream = (reqMethod !== "GET" && reqMethod !== "HEAD") ? req : undefined;
 
     const breaker = this.getCircuitBreaker(hostname);
 
@@ -310,13 +293,27 @@ export class HttpHandler {
         hostname,
         reqMethod,
         req.headers,
-        bodyBuffer,
+        reqStream,
         clientIp,
         res,
         breaker,
-        targetUrl.toString()
+        targetUrl.toString(),
+        {},
+        {},
+        maxBodyBytes
       );
     } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("Payload size limit exceeded")) {
+        audit.http(clientIp, reqMethod, hostname, reqUrl, 413, targetUrl.hostname);
+        if (!res.headersSent) {
+          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+          res.end("<h1>413 Payload Too Large / Stream Fault</h1>");
+        }
+        setTimeout(() => { if (!req.destroyed) req.destroy(); }, 50);
+        return;
+      }
+
       if (err.name === 'AbortError' || err.name === 'TimeoutError' || err.message === 'TimeoutError') {
         audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 504, "Upstream Gateway Timeout");
         res.writeHead(504, { "Content-Type": "text/html" });
@@ -370,7 +367,7 @@ export class HttpHandler {
         const redirect = this.proxyService.checkRedirect(hostConfig);
         if (redirect) {
           try {
-            await this.proxyService.validateTargetFirewall(redirect.target, this.config.firewall);
+            await this.proxyService.validateTargetFirewall(redirect.target, this.config);
             audit.http(clientIp, reqMethod, hostname, reqUrl, redirect.code, redirect.target);
             res.writeHead(redirect.code, { Location: redirect.target });
             res.end();
@@ -388,7 +385,7 @@ export class HttpHandler {
           let validatedIps: string[] = [];
 
           try {
-            validatedIps = await this.proxyService.validateTargetFirewall(upstreamBase.toString(), this.config.firewall);
+            validatedIps = await this.proxyService.validateTargetFirewall(upstreamBase.toString(), this.config);
           } catch (fwErr: any) {
             audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by L3 Firewall");
             res.writeHead(403, { "Content-Type": "text/html" });
@@ -422,23 +419,17 @@ export class HttpHandler {
 
           const shouldForwardBody = hostConfig.http_proxy.forwardRequestBody;
           const maxBodyBytes = hostConfig.http_proxy.maxRequestBodyBytes ?? 5 * 1024 * 1024;
-          let bodyBuffer: Buffer | undefined = undefined;
+          const reqStream = (shouldForwardBody && reqMethod !== "GET" && reqMethod !== "HEAD") ? req : undefined;
 
-          if (reqMethod !== "GET" && reqMethod !== "HEAD") {
-            try {
-              bodyBuffer = await this.readRequestBodySafe(req, maxBodyBytes, clientIp);
-            } catch (readErr: any) {
-              audit.http(clientIp, reqMethod, hostname, reqUrl, 413, upstreamBase.hostname);
-              res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-              res.end("<h1>413 Payload Too Large / Read Fault</h1>");
-              if (!req.destroyed) req.destroy();
-              return;
-            }
+          if (!shouldForwardBody && reqMethod !== "GET" && reqMethod !== "HEAD") {
+            req.resume();
           }
 
-          if (shouldForwardBody && bodyBuffer) {
+          if (shouldForwardBody) {
             customReqHeaders["X-Body-Forwarded"] = "true";
-            customReqHeaders["X-Body-Size"] = String(bodyBuffer.length);
+            if (req.headers["content-length"]) {
+              customReqHeaders["X-Body-Size"] = req.headers["content-length"];
+            }
           }
 
           const breaker = this.getCircuitBreaker(originalHostname);
@@ -448,13 +439,14 @@ export class HttpHandler {
             originalHostname,
             reqMethod,
             req.headers,
-            shouldForwardBody ? bodyBuffer : undefined,
+            reqStream,
             clientIp,
             res,
             breaker,
             targetUrl.toString(),
             customReqHeaders,
-            customResHeaders
+            customResHeaders,
+            maxBodyBytes
           );
           return;
         }
@@ -481,8 +473,7 @@ export class HttpHandler {
       let targetIp = hostname;
 
       if (!isLiteralIp) {
-        const records = await dns.resolve(hostname);
-        const targetIps = records.filter(ip => typeof ip === "string");
+        const targetIps = await this.proxyService.resolveHost(hostname, this.config);
         if (targetIps.length === 0) throw new Error("NXDOMAIN");
         targetIp = targetIps[0];
       }
@@ -502,19 +493,8 @@ export class HttpHandler {
       }
 
       const targetUrl = new URL(reqUrl, `http://${rawHost}`);
-      
-      let bodyBuffer: Buffer | undefined = undefined;
-      if (reqMethod !== "GET" && reqMethod !== "HEAD") {
-        const maxBodyBytes = this.config.hosts[hostname]?.http_proxy?.maxRequestBodyBytes ?? 5242880;
-        try {
-          bodyBuffer = await this.readRequestBodySafe(req, maxBodyBytes, clientIp);
-        } catch (readErr: any) {
-          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-          res.end("<h1>413 Payload Too Large / Read Fault</h1>");
-          if (!req.destroyed) req.destroy();
-          return;
-        }
-      }
+      const maxBodyBytes = this.config.hosts[hostname]?.http_proxy?.maxRequestBodyBytes ?? 5242880;
+      const reqStream = (reqMethod !== "GET" && reqMethod !== "HEAD") ? req : undefined;
 
       const breaker = this.getCircuitBreaker(hostname);
       await this.doHttpProxy(
@@ -523,16 +503,29 @@ export class HttpHandler {
         hostname,
         reqMethod,
         req.headers,
-        bodyBuffer,
+        reqStream,
         clientIp,
         res,
         breaker,
-        targetIp
+        targetIp,
+        {},
+        {},
+        maxBodyBytes
       );
 
     } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       audit.error(`HTTP request failed: ${message}`);
+
+      if (message.includes("Payload size limit exceeded")) {
+        audit.http(clientIp, reqMethod, hostname, reqUrl, 413, "Payload Too Large");
+        if (!res.headersSent) {
+          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+          res.end("<h1>413 Payload Too Large / Stream Fault</h1>");
+        }
+        setTimeout(() => { if (!req.destroyed) req.destroy(); }, 50);
+        return;
+      }
 
       if (err.name === 'AbortError' || err.name === 'TimeoutError' || message === 'TimeoutError') {
         audit.http(clientIp, reqMethod, hostname, reqUrl, 504, "Upstream Gateway Timeout");
@@ -613,6 +606,12 @@ export class HttpHandler {
   }
 
   getPort(): number {
+    if (this.server) {
+      const address = this.server.address();
+      if (address && typeof address === 'object') {
+        return address.port;
+      }
+    }
     return this.port;
   }
 }

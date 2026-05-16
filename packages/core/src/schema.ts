@@ -46,6 +46,11 @@ const HttpProxySchema = z.object({
   path: ["upstream"]
 });
 
+const TlsProxySchema = z.object({
+  targetPort: z.number().int().min(1).max(65535).optional(),
+  targetIp: Ipv4Schema.or(Ipv6Schema).optional()
+});
+
 const RedirectSchema = z.object({
   enabled: z.boolean().default(true),
   code: z.union([z.literal(301), z.literal(302), z.literal(303), z.literal(307), z.literal(308)]),
@@ -55,6 +60,7 @@ const RedirectSchema = z.object({
 const HostConfigSchema = z.object({
   records: z.array(DnsRecordSchema).default([]),
   http_proxy: HttpProxySchema.optional(),
+  tls_proxy: TlsProxySchema.optional(),
   redirect: RedirectSchema.optional(),
 });
 

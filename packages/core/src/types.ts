@@ -52,6 +52,11 @@ export interface HttpProxyConfig {
   maxRequestBodyBytes?: number;
 }
 
+export interface TlsProxyConfig {
+  targetPort?: number;
+  targetIp?: string;
+}
+
 export interface RedirectConfig {
   enabled: boolean;
   code: number;
@@ -61,6 +66,7 @@ export interface RedirectConfig {
 export interface HostConfig {
   records: DnsRecord[];
   http_proxy?: HttpProxyConfig;
+  tls_proxy?: TlsProxyConfig;
   redirect?: RedirectConfig;
 }
 
