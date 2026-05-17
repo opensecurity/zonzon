@@ -2,6 +2,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as net from "node:net";
+import * as fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { DevDnsServer } from "./dns-service.js";
 import { HttpProxyService } from "./http-proxy.js";
@@ -107,6 +108,13 @@ export class HttpHandler {
     this.config = config;
     this.port = config.httpPort ?? port ?? 80;
     this.idleTimeoutMs = config.tcpIdleTimeoutMs ?? 30000;
+  }
+
+  private resolveTlsMaterial(data: string): string | Buffer {
+    if (data.includes("-----BEGIN")) {
+      return data;
+    }
+    return fs.readFileSync(data);
   }
 
   private getCircuitBreaker(upstream: string): ProxyCircuitBreaker {
@@ -219,7 +227,8 @@ export class HttpHandler {
     auditUrl: string,
     customReqHeaders: Record<string, string> = {},
     customResHeaders: Record<string, string> = {},
-    maxBodyBytes: number = 5242880
+    maxBodyBytes: number = 5242880,
+    clientTls?: { cert: string | Buffer; key: string | Buffer; ca?: string | Buffer; serverName?: string }
   ): Promise<void> {
     const hopByHop = this.proxyService.getHopByHopHeaders();
     const outReqHeaders: Record<string, string> = {};
@@ -255,8 +264,20 @@ export class HttpHandler {
       method: reqMethod,
       headers: outReqHeaders,
       timeout: this.idleTimeoutMs,
-      servername: targetUrl.protocol === "https:" ? hostname : undefined
+      servername: targetUrl.protocol === "https:" ? (net.isIP(hostname) ? undefined : hostname) : undefined
     };
+
+    if (targetUrl.protocol === "https:" && clientTls) {
+      const httpsOpts = reqOptions as https.RequestOptions;
+      httpsOpts.cert = clientTls.cert;
+      httpsOpts.key = clientTls.key;
+      if (clientTls.ca) {
+        httpsOpts.ca = clientTls.ca;
+      }
+      if (clientTls.serverName) {
+        httpsOpts.servername = clientTls.serverName;
+      }
+    }
 
     const requestModule = targetUrl.protocol === "https:" ? https : http;
 
@@ -479,6 +500,16 @@ export class HttpHandler {
             }
           }
 
+          let clientTlsConfig: any = undefined;
+          if (hostConfig.http_proxy.clientTls) {
+            clientTlsConfig = {
+              cert: this.resolveTlsMaterial(hostConfig.http_proxy.clientTls.cert),
+              key: this.resolveTlsMaterial(hostConfig.http_proxy.clientTls.key),
+              ca: hostConfig.http_proxy.clientTls.ca ? this.resolveTlsMaterial(hostConfig.http_proxy.clientTls.ca) : undefined,
+              serverName: hostConfig.http_proxy.clientTls.serverName
+            };
+          }
+
           const breaker = this.getCircuitBreaker(originalHostname);
           await this.doHttpProxy(
             targetUrl,
@@ -493,7 +524,8 @@ export class HttpHandler {
             targetUrl.toString(),
             customReqHeaders,
             customResHeaders,
-            maxBodyBytes
+            maxBodyBytes,
+            clientTlsConfig
           );
           return;
         }

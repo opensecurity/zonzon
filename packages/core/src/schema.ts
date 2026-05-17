@@ -35,12 +35,20 @@ const DnsRecordSchema = z.discriminatedUnion("type", [
   PTRRecordSchema,
 ]);
 
+const TlsSchema = z.object({
+  cert: z.string().min(1),
+  key: z.string().min(1),
+  ca: z.string().min(1).optional(),
+  serverName: HostnameSchema.optional()
+});
+
 const HttpProxySchema = z.object({
   enabled: z.boolean(),
   upstream: CrlfFreeString.optional(),
   headers: z.record(z.string().max(256).regex(/^[a-zA-Z0-9\-]+$/), CrlfFreeString).default({}),
   forwardRequestBody: z.boolean().default(false),
   maxRequestBodyBytes: z.number().int().min(0).max(10485760).default(5242880),
+  clientTls: TlsSchema.optional()
 }).refine(data => !data.enabled || !!data.upstream, {
   message: "HTTP proxy requires 'upstream' URL when enabled",
   path: ["upstream"]
@@ -77,12 +85,8 @@ const FirewallSchema = z.object({
 const ControlPlaneSchema = z.object({
   enabled: z.boolean().default(true).optional(),
   port: z.coerce.number().int().min(1).max(65535).default(8080).optional(),
+  socketPath: z.string().max(256).optional(),
   apiKey: z.string().max(256).optional()
-});
-
-const TlsSchema = z.object({
-  cert: z.string().min(1),
-  key: z.string().min(1)
 });
 
 const ServerConfigSchema = z.object({

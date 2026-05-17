@@ -88,7 +88,7 @@ export class AuditLogger {
       const prefix = cached ? "cached " : "";
       const clock = this.getHumanTime();
       questions.forEach(q => {
-        const typeStr = (REVERSE_DNS_TYPES[q.type] || q.type).toString().toLowerCase();
+        const typeStr = (REVERSE_DNS_TYPES[q.type] || q.type).toString().toUpperCase();
         console.log(`[${clock}] [dns] ${this.sanitize(ip)} requested ${prefix}${typeStr} record for ${this.sanitize(q.name)} -> ${codeMap[rcode] || rcode}`);
       });
     }
@@ -111,7 +111,7 @@ export class AuditLogger {
       }));
     } else {
       const status = action === "ALLOW" ? "passed" : "blocked";
-      const extra = detail ? ` due to ${detail.toLowerCase()}` : "";
+      const extra = detail ? ` due to ${detail}` : "";
       console.log(`[${this.getHumanTime()}] [firewall] connection from ${this.sanitize(ip)} targeting ${this.sanitize(target)} was ${status}${extra}`);
     }
   }
@@ -152,7 +152,7 @@ export class AuditLogger {
         message: msg
       }));
     } else {
-      console.log(`[${this.getHumanTime()}] [system] ${this.sanitize(msg).toLowerCase()}`);
+      console.log(`[${this.getHumanTime()}] [system] ${this.sanitize(msg)}`);
     }
   }
   
@@ -168,7 +168,7 @@ export class AuditLogger {
         message: msg
       }));
     } else {
-      console.error(`[${this.getHumanTime()}] [error] ${this.sanitize(msg).toLowerCase()}`);
+      console.error(`[${this.getHumanTime()}] [error] ${this.sanitize(msg)}`);
     }
   }
 }

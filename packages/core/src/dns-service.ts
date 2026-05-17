@@ -36,12 +36,20 @@ export class DnsWireFormat {
   }
 
   readUint16(): number {
+    if (this.offset + 2 > this.buf.length) {
+      this.offset = this.buf.length;
+      return 0;
+    }
     const val = this.buf.readUInt16BE(this.offset);
     this.offset += 2;
     return val;
   }
 
   readUint8(): number {
+    if (this.offset + 1 > this.buf.length) {
+      this.offset = this.buf.length;
+      return 0;
+    }
     const val = this.buf.readUInt8(this.offset);
     this.offset += 1;
     return val;
@@ -49,53 +57,63 @@ export class DnsWireFormat {
 
   readDomainName(): string {
     const labels: string[] = [];
-    let jumped = false;
-    let jumpOffset = -1;
     let jumps = 0;
     const MAX_JUMPS = 5;
+    let currentOffset = this.offset;
+    let savedOffset = -1;
 
     while (true) {
-      if (jumped && jumpOffset >= 0) {
-        this.offset = jumpOffset;
-        jumped = false;
-        jumpOffset = -1;
+      if (currentOffset >= this.buf.length) {
+        break;
       }
 
-      if (this.offset >= this.buf.length) {
-        return labels.join(".");
-      }
+      const len = this.buf.readUInt8(currentOffset);
+      currentOffset += 1;
 
-      const len = this.readUint8();
       if (len === 0) break;
 
       if ((len & 0xc0) === 0xc0) {
         jumps++;
-        if (jumps > MAX_JUMPS) {
-          return labels.join(".");
+        if (jumps > MAX_JUMPS) break;
+        if (currentOffset >= this.buf.length) break;
+        
+        const ptr = ((len & 0x3f) << 8) | this.buf.readUInt8(currentOffset);
+        currentOffset += 1;
+        
+        if (savedOffset === -1) {
+          savedOffset = currentOffset;
         }
-        if (this.offset >= this.buf.length) {
-          return labels.join(".");
-        }
-        jumpOffset = ((len & 0x3f) << 8) | this.readUint8();
-        jumped = true;
+        currentOffset = ptr;
         continue;
       }
 
-      if (len > 63 || this.offset + len > this.buf.length) {
-        return labels.join(".");
+      if (len > 63 || currentOffset + len > this.buf.length) {
+        break;
       }
 
       const labelBytes = new Uint8Array(len);
       for (let i = 0; i < len; i++) {
-        labelBytes[i] = this.readUint8();
+        if (currentOffset >= this.buf.length) break;
+        labelBytes[i] = this.buf.readUInt8(currentOffset);
+        currentOffset += 1;
       }
       labels.push(new TextDecoder().decode(labelBytes));
+    }
+
+    if (savedOffset !== -1) {
+      this.offset = savedOffset;
+    } else {
+      this.offset = currentOffset;
     }
 
     return labels.join(".");
   }
 
   readUint32(): number {
+    if (this.offset + 4 > this.buf.length) {
+      this.offset = this.buf.length;
+      return 0;
+    }
     const val = this.buf.readUInt32BE(this.offset);
     this.offset += 4;
     return val;

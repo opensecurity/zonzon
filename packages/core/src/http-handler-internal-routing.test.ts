@@ -127,4 +127,56 @@ describe("HttpHandler - Internal Mapped Routing Verification", () => {
       await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
     }
   });
+
+  it("detects and terminates L7 SSRF routing loops deterministically returning 508", async () => {
+    const config: any = {
+      port: 53,
+      httpPort: 0,
+      firewall: {
+        defaultPolicy: "allow",
+        allowlist_ips: ["127.0.0.1"]
+      },
+      hosts: {
+        "loop.local": {
+          records: [{ type: "A", address: "127.0.0.1" }],
+          http_proxy: {
+            enabled: true,
+            upstream: "http://127.0.0.1",
+            headers: {}
+          }
+        }
+      }
+    };
+
+    const dnsServer = new DevDnsServer(config);
+    const handler = new HttpHandler(dnsServer, config, 0);
+    await handler.start();
+    const handlerPort = handler.getPort();
+
+    config.hosts["loop.local"].http_proxy.upstream = `http://127.0.0.1:${handlerPort}`;
+
+    try {
+      const result = await new Promise<{ status: number }>((resolve, reject) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: handlerPort,
+          path: "/",
+          method: "GET",
+          headers: {
+            "Host": `loop.local`,
+            "Connection": "close"
+          }
+        }, (res) => {
+          res.resume();
+          res.on("end", () => resolve({ status: res.statusCode || 500 }));
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      assert.strictEqual(result.status, 508, "Firewall bypassed: Routing loop was not terminated with 508");
+    } finally {
+      await handler.stop();
+    }
+  });
 });

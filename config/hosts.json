@@ -57,6 +57,27 @@
         "targetIp": "172.21.0.100"
       }
     },
+    "secure-api.loop": {
+      "records": [
+        {
+          "type": "A",
+          "address": "172.20.0.53"
+        }
+      ],
+      "http_proxy": {
+        "enabled": true,
+        "upstream": "https://172.21.0.100:1234",
+        "headers": {
+          "X-Environment": "sandbox-mtls-verified"
+        },
+        "clientTls": {
+          "cert": "/app/config/client.crt",
+          "key": "/app/config/client.key",
+          "ca": "/app/config/ca.crt",
+          "serverName": "secure.test.local"
+        }
+      }
+    },
     "mock.ai.loop": {
       "records": [
         {

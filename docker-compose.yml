@@ -38,6 +38,19 @@ services:
     networks:
       sandbox_net:
 
+  mtls_sandbox:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile.mtls
+    command: sleep infinity
+    dns:
+      - 172.20.0.53
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+    networks:
+      sandbox_net:
+      test_net:
+
 networks:
   sandbox_net:
     driver: bridge

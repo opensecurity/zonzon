@@ -1,0 +1,19 @@
+FROM alpine:3.19
+
+# Install raw cryptographic debugging tools
+RUN apk add --no-cache \
+    openssl \
+    curl \
+    bash \
+    bind-tools \
+    tshark \
+    tcpdump
+
+WORKDIR /workspace
+
+# Import the custom CA to the system trust store
+COPY tests/nginx/certs/custom-ca.crt /usr/local/share/ca-certificates/custom-ca.crt
+RUN update-ca-certificates
+
+# Drop into a persistent sleep so the container can be used for interactive execution
+CMD ["sleep", "infinity"]

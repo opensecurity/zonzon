@@ -44,12 +44,20 @@ export interface PTR {
 
 export type DnsRecord = ARecord | AAAARecord | CNAME | TXT | MX | NS | SRV | PTR;
 
+export interface TlsConfig {
+  cert: string;
+  key: string;
+  ca?: string;
+  serverName?: string;
+}
+
 export interface HttpProxyConfig {
   enabled: boolean;
   upstream?: string;
   headers: Record<string, string>;
   forwardRequestBody?: boolean;
   maxRequestBodyBytes?: number;
+  clientTls?: TlsConfig;
 }
 
 export interface TlsProxyConfig {
@@ -85,11 +93,6 @@ export interface ControlPlaneConfig {
   port?: number;
   socketPath?: string;
   apiKey?: string;
-}
-
-export interface TlsConfig {
-  cert: string;
-  key: string;
 }
 
 export interface ServerConfig {

@@ -42,6 +42,32 @@ describe("Schema Validation - Server Config", () => {
     assert.strictEqual(result.hosts["app.loop"].http_proxy!.headers["X-Debug"], "true");
   });
 
+  it("accepts valid clientTls configuration for mTLS", async () => {
+    const config = {
+      port: 53,
+      hosts: {
+        "mtls.loop": {
+          records: [{ type: "A", address: "10.0.0.1" }],
+          http_proxy: {
+            enabled: true,
+            upstream: "https://secure.upstream:443",
+            headers: {},
+            clientTls: {
+              cert: "/path/to/cert.pem",
+              key: "/path/to/key.pem",
+              ca: "/path/to/ca.pem"
+            }
+          }
+        }
+      }
+    };
+    
+    const result = validateServerConfig(config);
+    assert.strictEqual(result.hosts["mtls.loop"].http_proxy?.clientTls?.cert, "/path/to/cert.pem");
+    assert.strictEqual(result.hosts["mtls.loop"].http_proxy?.clientTls?.key, "/path/to/key.pem");
+    assert.strictEqual(result.hosts["mtls.loop"].http_proxy?.clientTls?.ca, "/path/to/ca.pem");
+  });
+
   it("accepts server config with redirect", async () => {
     const config = {
       port: 53,

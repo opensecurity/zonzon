@@ -590,6 +590,41 @@ describe("DevDnsServer - Response ID Preservation", () => {
 describe("DevDnsServer - Edge Case DNS Queries", () => {
   let server: DevDnsServer;
 
+  it("handles queries utilizing standard valid compression pointers without crashing", () => {
+    const config: ServerConfig = {
+      port: 53,
+      hosts: {
+        "test.loop": { records: [{ type: "A", address: "1.2.3.4" }] }
+      },
+    };
+    server = new DevDnsServer(config);
+
+    const buf = Buffer.alloc(50);
+    buf.writeUInt16BE(0x5555, 0); 
+    buf.writeUInt16BE(0x0100, 2); 
+    buf.writeUInt16BE(2, 4);      
+    
+    buf[12] = 4;
+    Buffer.from("test").copy(buf, 13);
+    buf[17] = 4;
+    Buffer.from("loop").copy(buf, 18);
+    buf[22] = 0;
+    
+    buf.writeUInt16BE(DNS_TYPES.A, 23); 
+    buf.writeUInt16BE(1, 25);           
+    
+    buf[27] = 0xc0;
+    buf[28] = 0x0c;
+    buf.writeUInt16BE(DNS_TYPES.A, 29); 
+    buf.writeUInt16BE(1, 31);           
+    
+    const response = server.resolve(buf.subarray(0, 33))!;
+    assert.ok(response.length > 0);
+    const { rcode } = parseResponseFlags(response);
+    assert.strictEqual(rcode, DNS_RCODE.NOERROR);
+    assert.strictEqual(getAnswerCount(response), 2);
+  });
+
   it("handles query with exactly header size buffer (12 bytes)", () => {
     const config: ServerConfig = {
       port: 53,
