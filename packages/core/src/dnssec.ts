@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto";
 import { DnsWireFormat } from "./dns-service.js";
-import { DNS_TYPES, DNS_CLASSES } from "./types.js";
+import { DNS_TYPES } from "./types.js";
 import { audit } from "./audit.js";
 
 interface ParsedRecord {
@@ -208,7 +208,7 @@ export class DnssecValidator {
       spkiBuffer = this.buildSpkiP256(dnskey.publicKey);
     } else {
       audit.system(`DNSSEC Skipped: Unsupported cryptographic algorithm ${rrsig.algorithm}`);
-      return true; 
+      return false; 
     }
 
     try {

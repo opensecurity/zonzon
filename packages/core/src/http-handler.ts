@@ -3,7 +3,7 @@ import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as net from "node:net";
 import * as fs from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHmac } from "node:crypto";
 import { DevDnsServer } from "./dns-service.js";
 import { HttpProxyService } from "./http-proxy.js";
 import { HostConfig, ServerConfig } from "./types.js";
@@ -18,6 +18,11 @@ class ProxyCircuitBreaker {
   private lastFailureTime = 0;
   private readonly threshold = 5;
   private readonly resetTimeoutMs = 10000;
+  private targetHostname: string;
+
+  constructor(targetHostname: string) {
+    this.targetHostname = targetHostname;
+  }
 
   async execute<T>(action: () => Promise<T>): Promise<T> {
     const now = Date.now();
@@ -25,8 +30,9 @@ class ProxyCircuitBreaker {
     if (this.state === CircuitState.OPEN) {
       if (now - this.lastFailureTime > this.resetTimeoutMs) {
         this.state = CircuitState.HALF_OPEN;
+        audit.system(`Circuit Breaker for ${this.targetHostname} transitioned to HALF_OPEN`);
       } else {
-        throw new Error("Target Offline");
+        throw new Error("Target Offline (Circuit Breaker OPEN)");
       }
     }
 
@@ -45,14 +51,16 @@ class ProxyCircuitBreaker {
   private recordFailure(time: number) {
     this.failures++;
     this.lastFailureTime = time;
-    if (this.failures >= this.threshold) {
+    if (this.failures >= this.threshold && this.state !== CircuitState.OPEN) {
       this.state = CircuitState.OPEN;
+      audit.system(`Circuit Breaker for ${this.targetHostname} transitioned to OPEN`);
     }
   }
 
   private reset() {
     this.state = CircuitState.CLOSED;
     this.failures = 0;
+    audit.system(`Circuit Breaker for ${this.targetHostname} transitioned to CLOSED`);
   }
 }
 
@@ -65,41 +73,15 @@ export class HttpHandler {
   private circuitBreakers = new Map<string, ProxyCircuitBreaker>();
   private activeConnections = new Set<net.Socket>();
   private idleTimeoutMs: number;
-  private readonly loopSecret = randomBytes(16).toString("hex");
+  private readonly loopSecret = randomBytes(32).toString("hex");
 
   private readonly fingerprintHeadersToScrub = [
-    // core servers & infrastructure proxies
-    "server",
-    "via",
-    "x-source",
-    "x-powered-by",
-    "x-generator",
-    
-    // cdn, reverse proxy, & cloud service trackers
-    "cf-ray",
-    "cf-cache-status",
-    "x-cache",
-    "x-cache-lookup",
-    "x-drupal-cache",
-    "x-varnish",
-    "x-nextjs-cache",
-    "x-fastly-request-id",
-    
-    // programming language runtimes & versions
-    "x-runtime",
-    "x-version",
-    "x-impl",
-    
-    // microsoft enterprise ecosystem markers
-    "x-aspnet-version",
-    "x-aspnetmvc-version",
-    "microsoftofficewebserver",
-    "x-powered-by-plesk",
-    
-    // open source content management configurations
-    "x-pingback",
-    "wp-super-cache",
-    "x-ghost-version"
+    "server", "via", "x-source", "x-powered-by", "x-generator", 
+    "cf-ray", "cf-cache-status", "x-cache", "x-cache-lookup", 
+    "x-drupal-cache", "x-varnish", "x-nextjs-cache", "x-fastly-request-id", 
+    "x-runtime", "x-version", "x-impl", "x-aspnet-version", 
+    "x-aspnetmvc-version", "microsoftofficewebserver", "x-powered-by-plesk", 
+    "x-pingback", "wp-super-cache", "x-ghost-version"
   ];
 
   constructor(dnsServer: DevDnsServer, config: ServerConfig, port?: number) {
@@ -125,7 +107,7 @@ export class HttpHandler {
           this.circuitBreakers.delete(firstKey);
         }
       }
-      this.circuitBreakers.set(upstream, new ProxyCircuitBreaker());
+      this.circuitBreakers.set(upstream, new ProxyCircuitBreaker(upstream));
     }
     return this.circuitBreakers.get(upstream)!;
   }
@@ -143,6 +125,11 @@ export class HttpHandler {
     }
 
     return undefined;
+  }
+
+  private generateLoopToken(url: string, clientIp: string): string {
+    const window = Math.floor(Date.now() / 60000);
+    return createHmac("sha256", this.loopSecret).update(`${url}:${clientIp}:${window}`).digest("hex");
   }
 
   private async handleConnect(req: IncomingMessage, clientSocket: net.Socket, head: Buffer): Promise<void> {
@@ -234,7 +221,8 @@ export class HttpHandler {
     const outReqHeaders: Record<string, string> = {};
 
     for (const [k, v] of Object.entries(reqHeaders)) {
-      if (!hopByHop.includes(k.toLowerCase()) && v !== undefined) {
+      const lowerKey = k.toLowerCase();
+      if (!hopByHop.includes(lowerKey) && v !== undefined) {
         outReqHeaders[k] = Array.isArray(v) ? v.join(", ") : v;
       }
     }
@@ -255,15 +243,17 @@ export class HttpHandler {
       outReqHeaders[k] = v;
     }
 
-    outReqHeaders["x-zonzon-loop"] = this.loopSecret;
+    const fullPath = targetUrl.pathname + targetUrl.search;
+    outReqHeaders["x-zonzon-loop"] = this.generateLoopToken(fullPath, clientIp);
 
     const reqOptions: http.RequestOptions | https.RequestOptions = {
       hostname: targetIp,
       port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
-      path: targetUrl.pathname + targetUrl.search,
+      path: fullPath,
       method: reqMethod,
       headers: outReqHeaders,
       timeout: this.idleTimeoutMs,
+      agent: false,
       servername: targetUrl.protocol === "https:" ? (net.isIP(hostname) ? undefined : hostname) : undefined
     };
 
@@ -288,14 +278,16 @@ export class HttpHandler {
 
       if (reqStream) {
         let bytesSent = 0;
-        reqStream.on("data", (chunk: Buffer) => {
+        const onData = (chunk: Buffer) => {
           bytesSent += chunk.length;
           if (bytesSent > maxBodyBytes) {
-            reqStream.removeAllListeners("data");
+            reqStream.removeListener("data", onData);
+            reqStream.unpipe(proxyReq);
             proxyReq.destroy(new Error("Payload size limit exceeded"));
             reject(new Error("Payload size limit exceeded"));
           }
-        });
+        };
+        reqStream.on("data", onData);
         reqStream.pipe(proxyReq);
         reqStream.on("error", (err) => {
           proxyReq.destroy(err);
@@ -323,6 +315,54 @@ export class HttpHandler {
     proxyResp.pipe(res);
   }
 
+  private handleHttpFault(err: any, clientIp: string, reqMethod: string, hostname: string, reqUrl: string, res: ServerResponse, req: IncomingMessage): void {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = err.code || "UNKNOWN";
+
+    if (message.includes("Payload size limit exceeded")) {
+      audit.http(clientIp, reqMethod, hostname, reqUrl, 413, "Payload Too Large");
+      if (!res.headersSent) {
+        res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
+        res.end("<h1>413 Payload Too Large / Stream Fault</h1>");
+      } else {
+        res.end();
+      }
+      return;
+    }
+
+    if (err.name === 'AbortError' || err.name === 'TimeoutError' || message === 'TimeoutError' || code === "ETIMEDOUT") {
+      audit.http(clientIp, reqMethod, hostname, reqUrl, 504, "Upstream Gateway Timeout");
+      res.writeHead(504, { "Content-Type": "text/html", "Connection": "close" });
+      res.end(`<h1>504 Gateway Timeout</h1>`);
+      return;
+    }
+
+    if (code === "ECONNREFUSED" || code === "EHOSTUNREACH" || code === "ENOTFOUND") {
+      audit.http(clientIp, reqMethod, hostname, reqUrl, 503, "Upstream Service Unavailable");
+      res.writeHead(503, { "Content-Type": "text/html", "Connection": "close" });
+      res.end(`<h1>503 Service Unavailable</h1>`);
+      return;
+    }
+
+    if (message.includes("Security Block") || message.includes("Firewall") || message.includes("Blocked") || message.includes("Restricted IP") || message.includes("Domain Blocked") || message.includes("Resolution Fault")) {
+      audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked for Security (SSRF/Firewall)");
+      res.writeHead(403, { "Content-Type": "text/html", "Connection": "close" });
+      res.end(`<h1>403 Forbidden</h1>`);
+      return;
+    }
+
+    if (message.includes("Circuit Breaker OPEN")) {
+      audit.http(clientIp, reqMethod, hostname, reqUrl, 503, "Circuit Breaker OPEN");
+      res.writeHead(503, { "Content-Type": "text/html", "Connection": "close" });
+      res.end(`<h1>503 Service Unavailable (Circuit Broken)</h1>`);
+      return;
+    }
+
+    audit.http(clientIp, reqMethod, hostname, reqUrl, 502, "Upstream Offline/Fault");
+    res.writeHead(502, { "Content-Type": "text/html", "Connection": "close" });
+    res.end(`<h1>502 Bad Gateway</h1>`);
+  }
+
   private async handleForwardProxy(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const clientIp = req.socket.remoteAddress || "unknown";
     const reqMethod = req.method || "GET";
@@ -336,7 +376,7 @@ export class HttpHandler {
       validatedIps = await this.proxyService.validateTargetFirewall(targetUrl.toString(), this.config);
     } catch (fwErr: any) {
       audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 403, "Blocked by L3/L7 Firewall");
-      res.writeHead(403, { "Content-Type": "text/html" });
+      res.writeHead(403, { "Content-Type": "text/html", "Connection": "close" });
       res.end(`<h1>403 Forbidden</h1><p>${fwErr.message}</p>`);
       return;
     }
@@ -364,27 +404,7 @@ export class HttpHandler {
         maxBodyBytes
       );
     } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("Payload size limit exceeded")) {
-        audit.http(clientIp, reqMethod, hostname, reqUrl, 413, targetUrl.hostname);
-        if (!res.headersSent) {
-          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-          res.end("<h1>413 Payload Too Large / Stream Fault</h1>");
-        }
-        setTimeout(() => { if (!req.destroyed) req.destroy(); }, 50);
-        return;
-      }
-
-      if (err.name === 'AbortError' || err.name === 'TimeoutError' || err.message === 'TimeoutError') {
-        audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 504, "Upstream Gateway Timeout");
-        res.writeHead(504, { "Content-Type": "text/html" });
-        res.end(`<h1>504 Gateway Timeout</h1>`);
-        return;
-      }
-
-      audit.http(clientIp, reqMethod, hostname, targetUrl.pathname, 502, "Upstream Offline or Fault");
-      res.writeHead(502, { "Content-Type": "text/html" });
-      res.end(`<h1>502 Bad Gateway</h1>`);
+      this.handleHttpFault(err, clientIp, reqMethod, hostname, reqUrl, res, req);
     }
   }
 
@@ -393,11 +413,19 @@ export class HttpHandler {
     const reqMethod = req.method || "GET";
     const reqUrl = req.url || "/";
 
-    if (req.headers["x-zonzon-loop"] === this.loopSecret) {
-      audit.http(clientIp, reqMethod, req.headers.host || "UNKNOWN", reqUrl, 508, "Routing Loop Detected");
-      res.writeHead(508, { "Content-Type": "text/html", "Connection": "close" });
-      res.end("<h1>508 Loop Detected</h1>");
-      return;
+    const providedLoopToken = req.headers["x-zonzon-loop"];
+    if (providedLoopToken) {
+      const expectedToken0 = this.generateLoopToken(reqUrl, clientIp);
+      
+      const windowPrev = Math.floor(Date.now() / 60000) - 1;
+      const expectedToken1 = createHmac("sha256", this.loopSecret).update(`${reqUrl}:${clientIp}:${windowPrev}`).digest("hex");
+
+      if (providedLoopToken === expectedToken0 || providedLoopToken === expectedToken1) {
+        audit.http(clientIp, reqMethod, req.headers.host || "UNKNOWN", reqUrl, 508, "Routing Loop Detected");
+        res.writeHead(508, { "Content-Type": "text/html", "Connection": "close" });
+        res.end("<h1>508 Loop Detected</h1>");
+        return;
+      }
     }
 
     if (reqUrl.startsWith("http://")) {
@@ -419,7 +447,7 @@ export class HttpHandler {
     try {
       if (!hostname) {
         audit.http(clientIp, reqMethod, "UNKNOWN", reqUrl, 400, "Missing Host Header");
-        res.writeHead(400);
+        res.writeHead(400, { "Connection": "close" });
         res.end("Bad Request");
         return;
       }
@@ -442,7 +470,7 @@ export class HttpHandler {
             return;
           } catch (err) {
             audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by L3 Firewall");
-            res.writeHead(403, { "Content-Type": "text/html" });
+            res.writeHead(403, { "Content-Type": "text/html", "Connection": "close" });
             res.end("<h1>403 Forbidden</h1>");
             return;
           }
@@ -456,7 +484,7 @@ export class HttpHandler {
             validatedIps = await this.proxyService.validateTargetFirewall(upstreamBase.toString(), this.config);
           } catch (fwErr: any) {
             audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by L3 Firewall");
-            res.writeHead(403, { "Content-Type": "text/html" });
+            res.writeHead(403, { "Content-Type": "text/html", "Connection": "close" });
             res.end(`<h1>403 Forbidden</h1><p>${fwErr.message}</p>`);
             return;
           }
@@ -475,14 +503,20 @@ export class HttpHandler {
           const originalHostname = targetUrl.hostname;
 
           const customReqHeaders: Record<string, string> = {};
-          const customResHeaders: Record<string, string> = { "X-Proxy": "zonzon" };
+          const customResHeaders: Record<string, string> = {};
 
-          for (const [key, value] of Object.entries(hostConfig.http_proxy.headers)) {
-            const sanitized = this.proxyService.sanitizeHeader(value);
-            if (sanitized) {
-              customReqHeaders[key] = sanitized;
-              customResHeaders[key] = sanitized;
-            }
+          try {
+            const upHeaders = this.proxyService.getUpstreamHeaders(hostConfig, {
+              hostname: hostname,
+              originalUrl: reqUrl,
+              headers: req.headers as Record<string, string>,
+              method: reqMethod,
+              body: undefined
+            });
+            Object.assign(customReqHeaders, upHeaders.upstreamHeaders);
+            Object.assign(customResHeaders, upHeaders.clientResponseHeaders);
+          } catch (err) {
+            audit.error(`Dropped proxy mapping due to cryptographic or header fault`);
           }
 
           const shouldForwardBody = hostConfig.http_proxy.forwardRequestBody;
@@ -491,13 +525,6 @@ export class HttpHandler {
 
           if (!shouldForwardBody && reqMethod !== "GET" && reqMethod !== "HEAD") {
             req.resume();
-          }
-
-          if (shouldForwardBody) {
-            customReqHeaders["X-Body-Forwarded"] = "true";
-            if (req.headers["content-length"]) {
-              customReqHeaders["X-Body-Size"] = req.headers["content-length"];
-            }
           }
 
           let clientTlsConfig: any = undefined;
@@ -536,14 +563,14 @@ export class HttpHandler {
       if (isLiteralIp) {
         if (firewallEngine.evaluateIp(hostname, this.config.firewall) === "DENY") {
            audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by IP Firewall");
-           res.writeHead(403);
+           res.writeHead(403, { "Connection": "close" });
            res.end("Forbidden");
            return;
         }
       } else {
         if (firewallEngine.evaluateDomain(hostname, this.config.firewall) === "DENY") {
            audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by Domain Firewall");
-           res.writeHead(403);
+           res.writeHead(403, { "Connection": "close" });
            res.end("Forbidden");
            return;
         }
@@ -559,14 +586,14 @@ export class HttpHandler {
 
       if (firewallEngine.evaluateIp(targetIp, this.config.firewall) === "DENY") {
          audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by IP Firewall");
-         res.writeHead(403);
+         res.writeHead(403, { "Connection": "close" });
          res.end("Forbidden");
          return;
       }
 
       if (firewallEngine.evaluateOutbound(targetIp, this.config.firewall) === "DENY") {
         audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked by SSRF Policy");
-        res.writeHead(403);
+        res.writeHead(403, { "Connection": "close" });
         res.end("Forbidden");
         return;
       }
@@ -593,37 +620,7 @@ export class HttpHandler {
       );
 
     } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err);
-      audit.error(`HTTP request failed: ${message}`);
-
-      if (message.includes("Payload size limit exceeded")) {
-        audit.http(clientIp, reqMethod, hostname, reqUrl, 413, "Payload Too Large");
-        if (!res.headersSent) {
-          res.writeHead(413, { "Content-Type": "text/html", "Connection": "close" });
-          res.end("<h1>413 Payload Too Large / Stream Fault</h1>");
-        }
-        setTimeout(() => { if (!req.destroyed) req.destroy(); }, 50);
-        return;
-      }
-
-      if (err.name === 'AbortError' || err.name === 'TimeoutError' || message === 'TimeoutError') {
-        audit.http(clientIp, reqMethod, hostname, reqUrl, 504, "Upstream Gateway Timeout");
-        res.writeHead(504, { "Content-Type": "text/html" });
-        res.end(`<h1>504 Gateway Timeout</h1>`);
-        return;
-      }
-
-      if (message.includes("Security Block") || message.includes("Firewall") || message.includes("Blocked") || message.includes("Restricted IP")) {
-        audit.http(clientIp, reqMethod, hostname, reqUrl, 403, "Blocked for Security (SSRF/Firewall)");
-        res.writeHead(403, { "Content-Type": "text/html" });
-        res.end(`<h1>403 Forbidden</h1>`);
-        return;
-      }
-      
-      audit.http(clientIp, reqMethod, hostname, reqUrl, 502, "Upstream Offline/Fault");
-      res.writeHead(502, { "Content-Type": "text/html" });
-      res.end(`<h1>502 Bad Gateway</h1>`);
-      return;
+      this.handleHttpFault(err, clientIp, reqMethod, hostname, reqUrl, res, req);
     }
   }
 
@@ -633,7 +630,7 @@ export class HttpHandler {
         this.handleRequest(req, res).catch((err) => {
           audit.error(`HTTP interface critical error: ${err}`);
           if (!res.headersSent) {
-            res.writeHead(500, { "Content-Type": "text/html" });
+            res.writeHead(500, { "Content-Type": "text/html", "Connection": "close" });
             res.end("<h1>500 Internal Server Error</h1>");
           }
         });
@@ -647,7 +644,7 @@ export class HttpHandler {
         this.handleConnect(req, clientSocket, head).catch((err) => {
           audit.error(`TCP CONNECT critical error: ${err}`);
           if (!clientSocket.destroyed) {
-            clientSocket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+            clientSocket.write('HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n');
             clientSocket.destroy();
           }
         });
@@ -663,6 +660,10 @@ export class HttpHandler {
       this.server.on('error', (err) => reject(err));
 
       this.server.listen(this.port, "0.0.0.0", () => {
+        const addr = this.server?.address();
+        if (this.port === 0 && addr && typeof addr === 'object') {
+          this.port = addr.port;
+        }
         audit.system(`L7 Sandbox Firewall routing internally on boundary :${this.port}`);
         resolve();
       });
@@ -671,8 +672,12 @@ export class HttpHandler {
 
   async stop(): Promise<void> {
     if (this.server) {
-      if ('closeIdleConnections' in this.server) {
-         (this.server as any).closeIdleConnections();
+      if ('closeAllConnections' in this.server) {
+         (this.server as any).closeAllConnections();
+      }
+
+      for (const socket of this.activeConnections) {
+        if (!socket.destroyed) socket.destroy();
       }
 
       await new Promise<void>((resolve) => {

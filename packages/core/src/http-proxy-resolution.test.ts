@@ -1,10 +1,28 @@
-import { describe, it } from "node:test";
+import { describe, it, mock, afterEach, beforeEach } from "node:test";
 import assert from "node:assert";
 import { HttpProxyService } from "./http-proxy.js";
 import { ServerConfig } from "./types.js";
 
-describe("HttpProxyService - Zero-Trust Internal Resolution", { timeout: 15000 }, () => {
+describe("HttpProxyService - Zero-Trust Internal Resolution", { timeout: 5000 }, () => {
   const proxy = new HttpProxyService();
+
+  beforeEach(() => {
+    mock.method(proxy, 'dnsResolve', async (hostname: string) => {
+       if (hostname === "this-domain-does-not-exist.invalid") {
+           const err = new Error("queryA ENOTFOUND this-domain-does-not-exist.invalid");
+           (err as any).code = "ENOTFOUND";
+           throw err;
+       }
+       if (hostname === "ipv6.local") {
+           return [];
+       }
+       return ["8.8.8.8"];
+    });
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+  });
 
   it("resolves exact mapped internal hostnames bypassing external DNS", async () => {
     const config: ServerConfig = {
@@ -44,7 +62,6 @@ describe("HttpProxyService - Zero-Trust Internal Resolution", { timeout: 15000 }
       }
     };
     
-    // Should bypass the "*" rule and attempt external DNS resolution, which fails with NXDOMAIN
     await assert.rejects(
       proxy.resolveHost("this-domain-does-not-exist.invalid", config),
       /ENOTFOUND|NXDOMAIN/
@@ -91,8 +108,23 @@ describe("HttpProxyService - Zero-Trust Internal Resolution", { timeout: 15000 }
   });
 });
 
-describe("HttpProxyService - Target Firewall Validation Integration", { timeout: 15000 }, () => {
+describe("HttpProxyService - Target Firewall Validation Integration", { timeout: 5000 }, () => {
   const proxy = new HttpProxyService();
+
+  beforeEach(() => {
+    mock.method(proxy, 'dnsResolve', async (hostname: string) => {
+       if (hostname === "this-domain-does-not-exist.invalid") {
+           const err = new Error("queryA ENOTFOUND this-domain-does-not-exist.invalid");
+           (err as any).code = "ENOTFOUND";
+           throw err;
+       }
+       return ["8.8.8.8"];
+    });
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+  });
 
   it("resolves literal IPv4 addresses directly without DNS", async () => {
     const config: ServerConfig = { port: 53, hosts: {} };

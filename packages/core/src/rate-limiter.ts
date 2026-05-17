@@ -43,9 +43,9 @@ export class RateLimiter {
 
     if (!bucket || now >= bucket.resetTime) {
       if (this.buckets.size >= this.maxTrackedIps) {
-        const firstKey = this.buckets.keys().next().value;
-        if (firstKey !== undefined) {
-          this.buckets.delete(firstKey);
+        const oldestKey = this.buckets.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.buckets.delete(oldestKey);
         }
       }
       bucket = { count: 1, resetTime: now + this.options.windowMs };

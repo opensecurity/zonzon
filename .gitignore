@@ -149,3 +149,5 @@ certs
 *.crt
 *.key
 *.pem
+
+.zonzon-master-key

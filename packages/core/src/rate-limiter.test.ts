@@ -2,9 +2,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import * as net from "node:net";
 
-let PORT_BASE = 65000;
-function nextPort(): number { return PORT_BASE++; }
-
 describe("TCP Rate Limiting", () => {
   function buildTcpDnsQuery(name: string): Buffer {
     const encoder = new (class {
@@ -27,22 +24,22 @@ describe("TCP Rate Limiting", () => {
   }
 
   it("TCP queries are rate limited when configured", async () => {
-    const port = nextPort();
     const { DnsHandler } = await import("./dns-handler.js");
     const { DevDnsServer } = await import("./dns-service.js");
-    const config: any = { port, hosts: { "test.loop": { records: [{ type: "A", address: "5.6.7.8" }] } }, rateLimitMaxRequests: 3, rateLimitWindowMs: 1000 };
+    const config: any = { port: 0, hosts: { "test.loop": { records: [{ type: "A", address: "5.6.7.8" }] } }, rateLimitMaxRequests: 3, rateLimitWindowMs: 1000 };
 
     const dnsServer = new DevDnsServer(config);
     const handler = new DnsHandler(dnsServer, config);
     await handler.start();
+    const port = handler.getPort();
 
     try {
-      await new Promise<void>((r) => setTimeout(r, 150));
-
       const results: number[] = [];
       for (let i = 0; i < 3; i++) {
         let responses = 0;
         await new Promise<void>((resolve) => {
+          let done = false;
+          const doneCb = () => { if (!done) { done = true; resolve(); } };
           const socket = net.createConnection(port, "127.0.0.1", () => {
             socket.write(buildTcpDnsQuery("test.loop"));
             socket.on("data", (data: Buffer) => {
@@ -52,9 +49,12 @@ describe("TCP Rate Limiting", () => {
                 if (len === 0 || off + 2 + len > data.length) break;
                 responses++; off += 2 + len;
               }
+              socket.destroy();
+              doneCb();
             });
-            setTimeout(() => { socket.destroy(); resolve(); }, 1000);
           });
+          socket.on("error", doneCb);
+          socket.on("close", doneCb);
         });
         results.push(responses);
       }
@@ -66,20 +66,20 @@ describe("TCP Rate Limiting", () => {
   });
 
   it("TCP connection is terminated when source IP exceeds rate limit", async () => {
-    const port = nextPort();
     const { DnsHandler } = await import("./dns-handler.js");
     const { DevDnsServer } = await import("./dns-service.js");
-    const config: any = { port, hosts: { "test.loop": { records: [{ type: "A", address: "9.8.7.6" }] } }, rateLimitMaxRequests: 1, rateLimitWindowMs: 5000 };
+    const config: any = { port: 0, hosts: { "test.loop": { records: [{ type: "A", address: "9.8.7.6" }] } }, rateLimitMaxRequests: 1, rateLimitWindowMs: 5000 };
 
     const dnsServer = new DevDnsServer(config);
     const handler = new DnsHandler(dnsServer, config);
     await handler.start();
+    const port = handler.getPort();
 
     try {
-      await new Promise<void>((r) => setTimeout(r, 150));
-
       let r1Responses = 0;
       await new Promise<void>((resolve) => {
+        let done = false;
+        const doneCb = () => { if (!done) { done = true; resolve(); } };
         const socket = net.createConnection(port, "127.0.0.1", () => {
           socket.write(buildTcpDnsQuery("test.loop"));
           socket.on("data", (data: Buffer) => {
@@ -89,19 +89,24 @@ describe("TCP Rate Limiting", () => {
               if (len === 0 || off + 2 + len > data.length) break;
               r1Responses++; off += 2 + len;
             }
+            socket.destroy();
+            doneCb();
           });
-          setTimeout(() => { socket.destroy(); resolve(); }, 1000);
         });
+        socket.on("error", doneCb);
+        socket.on("close", doneCb);
       });
       assert.ok(r1Responses > 0);
 
       let r2Destroyed = false;
       await new Promise<void>((resolve) => {
+        let done = false;
+        const doneCb = () => { if (!done) { done = true; resolve(); } };
         const socket = net.createConnection(port, "127.0.0.1", () => {
-          setTimeout(() => { socket.destroy(); resolve(); }, 1500);
+          setTimeout(() => { socket.destroy(); doneCb(); }, 200);
         });
-        socket.on("error", () => { r2Destroyed = true; });
-        socket.on("close", () => { if (!r2Destroyed) r2Destroyed = true; });
+        socket.on("error", () => { r2Destroyed = true; doneCb(); });
+        socket.on("close", () => { r2Destroyed = true; doneCb(); });
       });
 
       assert.strictEqual(r2Destroyed, true);
@@ -111,27 +116,32 @@ describe("TCP Rate Limiting", () => {
   });
 
   it("TCP queries work when rate limiting is disabled", async () => {
-    const port = nextPort();
     const { DnsHandler } = await import("./dns-handler.js");
     const { DevDnsServer } = await import("./dns-service.js");
-    const config: any = { port, hosts: { "test.loop": { records: [{ type: "A", address: "1.2.3.4" }] } }, rateLimitMaxRequests: 0 };
+    const config: any = { port: 0, hosts: { "test.loop": { records: [{ type: "A", address: "1.2.3.4" }] } }, rateLimitMaxRequests: 0 };
 
     const dnsServer = new DevDnsServer(config);
     const handler = new DnsHandler(dnsServer, config);
     await handler.start();
+    const port = handler.getPort();
 
     try {
-      await new Promise<void>((r) => setTimeout(r, 150));
-
       let successes = 0;
       for (let i = 0; i < 5; i++) {
         let gotResponse = false;
         await new Promise<void>((resolve) => {
+          let done = false;
+          const doneCb = () => { if (!done) { done = true; resolve(); } };
           const socket = net.createConnection(port, "127.0.0.1", () => {
             socket.write(buildTcpDnsQuery("test.loop"));
-            socket.on("data", () => { gotResponse = true; });
-            setTimeout(() => { socket.destroy(); resolve(); }, 1000);
+            socket.on("data", () => { 
+              gotResponse = true; 
+              socket.destroy();
+              doneCb();
+            });
           });
+          socket.on("error", doneCb);
+          socket.on("close", doneCb);
         });
         if (gotResponse) successes++;
       }

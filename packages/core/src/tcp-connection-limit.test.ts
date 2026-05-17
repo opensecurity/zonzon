@@ -2,22 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import * as net from "node:net";
 
-let PORT_BASE = 61500;
-
-function nextPort(): number {
-  return PORT_BASE++;
-}
-
 describe("DnsHandler - TCP Connection Limiting", () => {
   it("rejects new connections after max is reached", async () => {
-    const port = nextPort();
     const { DnsHandler } = await import("./dns-handler.js");
     const { DevDnsServer } = await import("./dns-service.js");
-    const config: any = { port, hosts: {}, maxTcpConnections: 2, tcpIdleTimeoutMs: 30000, rateLimitMaxRequests: 0 };
+    const config: any = { port: 0, hosts: {}, maxTcpConnections: 2, tcpIdleTimeoutMs: 30000, rateLimitMaxRequests: 0 };
 
     const dnsServer = new DevDnsServer(config);
     const handler = new DnsHandler(dnsServer, config);
     await handler.start();
+    const port = handler.getPort();
 
     try {
       await new Promise<void>((r) => setTimeout(r, 150));
@@ -25,6 +19,7 @@ describe("DnsHandler - TCP Connection Limiting", () => {
       const sockets: net.Socket[] = [];
       for (let i = 0; i < 2; i++) {
         const s = net.createConnection(port, "127.0.0.1", () => {});
+        s.on("error", () => {});
         sockets.push(s);
       }
 
@@ -41,27 +36,31 @@ describe("DnsHandler - TCP Connection Limiting", () => {
       const destroyed = await thirdPromise;
       assert.strictEqual(destroyed, true);
 
-      for (const s of sockets) s.destroy();
+      for (const s of sockets) {
+        if (!s.destroyed) s.destroy();
+      }
     } finally {
       await handler.stop();
     }
   });
 
   it("admits connections when one closes (below max)", async () => {
-    const port = nextPort();
     const { DnsHandler } = await import("./dns-handler.js");
     const { DevDnsServer } = await import("./dns-service.js");
-    const config: any = { port, hosts: {}, maxTcpConnections: 2, tcpIdleTimeoutMs: 1000, rateLimitMaxRequests: 0 };
+    const config: any = { port: 0, hosts: {}, maxTcpConnections: 2, tcpIdleTimeoutMs: 1000, rateLimitMaxRequests: 0 };
 
     const dnsServer = new DevDnsServer(config);
     const handler = new DnsHandler(dnsServer, config);
     await handler.start();
+    const port = handler.getPort();
 
     try {
       await new Promise<void>((r) => setTimeout(r, 150));
 
       const socket1 = net.createConnection(port, "127.0.0.1");
+      socket1.on("error", () => {});
       const socket2 = net.createConnection(port, "127.0.0.1");
+      socket2.on("error", () => {});
 
       await new Promise<void>((r) => setTimeout(r, 150));
 
@@ -85,19 +84,20 @@ describe("DnsHandler - TCP Connection Limiting", () => {
   });
 
   it("closes idle connections after timeout", async () => {
-    const port = nextPort();
     const { DnsHandler } = await import("./dns-handler.js");
     const { DevDnsServer } = await import("./dns-service.js");
-    const config: any = { port, hosts: {}, maxTcpConnections: 5, tcpIdleTimeoutMs: 300, rateLimitMaxRequests: 0 };
+    const config: any = { port: 0, hosts: {}, maxTcpConnections: 5, tcpIdleTimeoutMs: 300, rateLimitMaxRequests: 0 };
 
     const dnsServer = new DevDnsServer(config);
     const handler = new DnsHandler(dnsServer, config);
     await handler.start();
+    const port = handler.getPort();
 
     try {
       await new Promise<void>((r) => setTimeout(r, 150));
 
       const socket = net.createConnection(port, "127.0.0.1");
+      socket.on("error", () => {});
       await new Promise<void>((r) => socket.on("connect", () => r()));
 
       await new Promise<void>((r) => setTimeout(r, 800));

@@ -12,7 +12,7 @@ describe("HttpHandler - Internal Mapped Routing Verification", () => {
     const upstreamServer = http.createServer((req, res) => {
       reachedUpstream = true;
       receivedHostHeader = req.headers.host || "";
-      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.writeHead(200, { "Content-Type": "text/plain", "Connection": "close" });
       res.end("internal-success-payload");
     });
 
@@ -40,25 +40,36 @@ describe("HttpHandler - Internal Mapped Routing Verification", () => {
 
     try {
       const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        let resolved = false;
+        let currentStatus = 500;
+        const done = (status: number, body: string) => {
+          if (!resolved) { resolved = true; resolve({ status, body }); }
+        };
+
         const req = http.request({
           hostname: "127.0.0.1",
           port: handlerPort,
           path: "/secure-data",
           method: "GET",
+          agent: false,
+          lookup: (hostname: string, options: any, cb: any) => cb(null, "127.0.0.1", 4),
           headers: {
             "Host": `airgapped.local:${upstreamPort}`,
             "Connection": "close"
           }
         }, (res) => {
+          currentStatus = res.statusCode || 500;
           let body = "";
           res.on("data", chunk => body += chunk);
-          res.on("end", () => resolve({ status: res.statusCode || 500, body }));
+          res.on("end", () => done(currentStatus, body));
+          res.on("aborted", () => done(currentStatus, body));
+          res.on("error", () => done(currentStatus, body));
         });
-        req.on("error", reject);
+        req.on("error", (err) => done(currentStatus, err.message));
         req.end();
       });
 
-      assert.strictEqual(result.status, 200, "Handler failed to route to internal host via 200 OK");
+      assert.strictEqual(result.status, 200, `Handler failed to route to internal host. Result: ${result.body}`);
       assert.strictEqual(result.body, "internal-success-payload", "Upstream payload mutation or loss");
       assert.strictEqual(reachedUpstream, true, "Traffic escaped isolation boundary or failed to reach target");
       assert.strictEqual(receivedHostHeader, `airgapped.local:${upstreamPort}`, "Host header was corrupted or lost during internal forward");
@@ -73,7 +84,7 @@ describe("HttpHandler - Internal Mapped Routing Verification", () => {
 
   it("enforces L7 firewall boundaries against internal mapped hosts", async () => {
     const upstreamServer = http.createServer((req, res) => {
-      res.writeHead(200);
+      res.writeHead(200, { "Connection": "close" });
       res.end("should-not-be-reached");
     });
 
@@ -100,25 +111,37 @@ describe("HttpHandler - Internal Mapped Routing Verification", () => {
     const handlerPort = handler.getPort();
 
     try {
-      const result = await new Promise<{ status: number }>((resolve, reject) => {
+      const result = await new Promise<{ status: number, body: string }>((resolve, reject) => {
+        let resolved = false;
+        let currentStatus = 500;
+        const done = (status: number, body: string) => {
+          if (!resolved) { resolved = true; resolve({ status, body }); }
+        };
+
         const req = http.request({
           hostname: "127.0.0.1",
           port: handlerPort,
           path: "/",
           method: "GET",
+          agent: false,
+          lookup: (hostname: string, options: any, cb: any) => cb(null, "127.0.0.1", 4),
           headers: {
             "Host": `forbidden.local:${upstreamPort}`,
             "Connection": "close"
           }
         }, (res) => {
-          res.resume(); 
-          res.on("end", () => resolve({ status: res.statusCode || 500 }));
+          currentStatus = res.statusCode || 500;
+          let body = "";
+          res.on("data", chunk => body += chunk);
+          res.on("end", () => done(currentStatus, body));
+          res.on("aborted", () => done(currentStatus, body));
+          res.on("error", () => done(currentStatus, body));
         });
-        req.on("error", reject);
+        req.on("error", (err) => done(currentStatus, err.message));
         req.end();
       });
 
-      assert.strictEqual(result.status, 403, "Firewall bypassed: Target was reachable despite domain blocklist");
+      assert.strictEqual(result.status, 403, `Firewall bypassed: Target was reachable despite domain blocklist. Result: ${result.body}`);
     } finally {
       await handler.stop();
       if ('closeAllConnections' in upstreamServer) {
@@ -156,25 +179,37 @@ describe("HttpHandler - Internal Mapped Routing Verification", () => {
     config.hosts["loop.local"].http_proxy.upstream = `http://127.0.0.1:${handlerPort}`;
 
     try {
-      const result = await new Promise<{ status: number }>((resolve, reject) => {
+      const result = await new Promise<{ status: number, body: string }>((resolve, reject) => {
+        let resolved = false;
+        let currentStatus = 500;
+        const done = (status: number, body: string) => {
+          if (!resolved) { resolved = true; resolve({ status, body }); }
+        };
+
         const req = http.request({
           hostname: "127.0.0.1",
           port: handlerPort,
           path: "/",
           method: "GET",
+          agent: false,
+          lookup: (hostname: string, options: any, cb: any) => cb(null, "127.0.0.1", 4),
           headers: {
             "Host": `loop.local`,
             "Connection": "close"
           }
         }, (res) => {
-          res.resume();
-          res.on("end", () => resolve({ status: res.statusCode || 500 }));
+          currentStatus = res.statusCode || 500;
+          let body = "";
+          res.on("data", chunk => body += chunk);
+          res.on("end", () => done(currentStatus, body));
+          res.on("aborted", () => done(currentStatus, body));
+          res.on("error", () => done(currentStatus, body));
         });
-        req.on("error", reject);
+        req.on("error", (err) => done(currentStatus, err.message));
         req.end();
       });
 
-      assert.strictEqual(result.status, 508, "Firewall bypassed: Routing loop was not terminated with 508");
+      assert.strictEqual(result.status, 508, `Firewall bypassed: Routing loop was not terminated with 508. Result: ${result.body}`);
     } finally {
       await handler.stop();
     }

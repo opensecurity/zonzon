@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promises as fs } from "node:fs";
-import { createHash } from "crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import { ConfigService } from "./config.service.js";
 import { ConfigHandler } from "./config.handler.js";
 import { ServerConfig } from "@opensecurity/zonzon-core";
@@ -16,9 +16,14 @@ const MOCK_DEVICE_ID = "test-device-id-1234";
 
 let globalNonceCounter = 0;
 
-function generateValidPoW(salt: string): string {
+function generateValidPoW(salt: string, deviceId: string, payloadStr: string): string {
+  const deviceSecret = hkdfSync("sha256", salt, Buffer.alloc(0), "device_id_derivation", 32);
+  const deviceHash = createHmac("sha256", Buffer.from(deviceSecret)).update(deviceId).digest("hex");
+  const payloadHash = createHash("sha256").update(payloadStr).digest("hex");
+
   const timeWindow = Math.floor(Date.now() / 300000);
-  const challenge = `${salt}:${timeWindow}`;
+  const challenge = `${salt}:${timeWindow}:${deviceHash}:${payloadHash}`;
+  
   while (true) {
     const hash = createHash("sha256").update(challenge + globalNonceCounter.toString()).digest("hex");
     if (hash.startsWith("0000")) {
@@ -33,7 +38,6 @@ function generateValidPoW(salt: string): string {
 describe("Control Plane API Tests", () => {
   let server: http.Server;
   let port: number;
-  let validNonce: string;
   let tempConfigPath: string;
 
   const initialConfig: ServerConfig = {
@@ -47,7 +51,6 @@ describe("Control Plane API Tests", () => {
     tempConfigPath = path.join(os.tmpdir(), `hosts-test-${Date.now()}.json`);
     await fs.writeFile(tempConfigPath, JSON.stringify(initialConfig), { mode: 0o600 });
 
-    validNonce = generateValidPoW(MOCK_SALT);
     const service = new ConfigService(initialConfig, tempConfigPath);
     const handler = new ConfigHandler(service, MOCK_API_KEY, MOCK_SALT);
 
@@ -61,6 +64,9 @@ describe("Control Plane API Tests", () => {
   });
 
   after(async () => {
+    if ('closeAllConnections' in server) {
+      (server as any).closeAllConnections();
+    }
     server.close();
     try {
       await fs.unlink(tempConfigPath);
@@ -74,7 +80,8 @@ describe("Control Plane API Tests", () => {
         port: port,
         path: path,
         method: method,
-        headers: headers
+        agent: false,
+        headers: { ...headers, "Connection": "close" }
       };
 
       const req = http.request(options, (res) => {
@@ -119,23 +126,25 @@ describe("Control Plane API Tests", () => {
 
   it("rejects PUT requests without Proof of Work challenge", async () => {
     const newConfig = { ...initialConfig, port: 5353 };
+    const payloadStr = JSON.stringify(newConfig);
     const res = await makeRequest("PUT", "/api/v1/config", {
       "x-api-key": MOCK_API_KEY,
       "x-device-id": MOCK_DEVICE_ID,
       "Content-Type": "application/json"
-    }, JSON.stringify(newConfig));
+    }, payloadStr);
     assert.strictEqual(res.status, 401);
     assert.ok(res.data.error.includes("x-pow-nonce"));
   });
 
   it("rejects PUT requests with invalid Proof of Work challenge", async () => {
     const newConfig = { ...initialConfig, port: 5353 };
+    const payloadStr = JSON.stringify(newConfig);
     const res = await makeRequest("PUT", "/api/v1/config", {
       "x-api-key": MOCK_API_KEY,
       "x-device-id": MOCK_DEVICE_ID,
       "x-pow-nonce": "invalid-nonce-value",
       "Content-Type": "application/json"
-    }, JSON.stringify(newConfig));
+    }, payloadStr);
     assert.strictEqual(res.status, 403);
     assert.ok(res.data.error.includes("Invalid Proof of Work"));
   });
@@ -147,13 +156,15 @@ describe("Control Plane API Tests", () => {
         "updated.loop": { records: [{ type: "A", address: "8.8.8.8" }] }
       }
     };
-    const freshNonce = generateValidPoW(MOCK_SALT);
+    const payloadStr = JSON.stringify(newConfig);
+    const freshNonce = generateValidPoW(MOCK_SALT, MOCK_DEVICE_ID, payloadStr);
+    
     const res = await makeRequest("PUT", "/api/v1/config", {
       "x-api-key": MOCK_API_KEY,
       "x-device-id": MOCK_DEVICE_ID,
       "x-pow-nonce": freshNonce,
       "Content-Type": "application/json"
-    }, JSON.stringify(newConfig));
+    }, payloadStr);
     
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.success, true);
@@ -174,7 +185,7 @@ describe("Control Plane API Tests", () => {
 
   it("rejects payloads exceeding the memory boundary", async () => {
     const hugePayload = JSON.stringify({ port: 53, hosts: {} }) + " ".repeat(1.5 * 1024 * 1024);
-    const boundaryNonce = generateValidPoW(MOCK_SALT);
+    const boundaryNonce = generateValidPoW(MOCK_SALT, MOCK_DEVICE_ID, hugePayload);
     const res = await makeRequest("PUT", "/api/v1/config", {
       "x-api-key": MOCK_API_KEY,
       "x-device-id": MOCK_DEVICE_ID,

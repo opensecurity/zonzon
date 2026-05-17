@@ -17,7 +17,7 @@ export class FirewallEngine {
   }
 
   private matchDomain(domain: string, pattern: string): boolean {
-    if (pattern === "*") return true; 
+    if (pattern === "*") return true;
     const normDomain = domain.toLowerCase().replace(/\.$/, "");
     const normPattern = pattern.toLowerCase().replace(/\.$/, "");
     
@@ -29,21 +29,39 @@ export class FirewallEngine {
     return false;
   }
 
+  private normalizeIp(ip: string): string {
+    if (!net.isIPv6(ip)) return ip;
+    const normalized = ip.toLowerCase();
+    if (normalized.startsWith("::ffff:")) {
+      const hexPart = normalized.slice(7);
+      if (net.isIPv4(hexPart)) return hexPart;
+      const chunks = hexPart.split(":");
+      if (chunks.length === 2) {
+        const p1 = parseInt(chunks[0], 16);
+        const p2 = parseInt(chunks[1], 16);
+        if (!isNaN(p1) && !isNaN(p2)) {
+          return `${(p1 >> 8) & 255}.${p1 & 255}.${(p2 >> 8) & 255}.${p2 & 255}`;
+        }
+      }
+    }
+    return ip;
+  }
+
   public isRestrictedOutbound(ip: string): boolean {
-    if (net.isIPv6(ip)) {
-      const normalized = ip.toLowerCase();
+    const normalizedIp = this.normalizeIp(ip);
+
+    if (net.isIPv6(normalizedIp)) {
+      const normalized = normalizedIp.toLowerCase();
       if (normalized === "::1") return true;
       if (normalized === "::") return true;
       if (normalized.startsWith("fe80:")) return true;
       if (normalized.startsWith("fc00:") || normalized.startsWith("fd")) return true;
-      if (normalized.includes("::ffff:127.")) return true;
-      if (normalized.includes("::ffff:169.254.")) return true;
       return false;
     }
 
-    if (!net.isIPv4(ip)) return true;
+    if (!net.isIPv4(normalizedIp)) return true;
 
-    const parts = ip.split('.').map(Number);
+    const parts = normalizedIp.split('.').map(Number);
     
     if (parts[0] === 0) return true; 
     if (parts[0] === 10) return true; 
@@ -59,37 +77,41 @@ export class FirewallEngine {
   }
 
   public evaluateOutbound(ip: string, fw?: FirewallConfig): "ALLOW" | "DENY" {
+    const normalizedIp = this.normalizeIp(ip);
+
     if (fw) {
-      if (fw.allowlist_ips && fw.allowlist_ips.includes(ip)) return "ALLOW";
-      if (net.isIPv4(ip)) {
+      if (fw.allowlist_ips && fw.allowlist_ips.includes(normalizedIp)) return "ALLOW";
+      if (net.isIPv4(normalizedIp)) {
         for (const range of fw.allowlist_ranges || []) {
-          if (this.matchCidr(ip, range)) return "ALLOW";
+          if (this.matchCidr(normalizedIp, range)) return "ALLOW";
         }
       }
     }
     
-    if (this.isRestrictedOutbound(ip)) return "DENY";
+    if (this.isRestrictedOutbound(normalizedIp)) return "DENY";
     
     return "ALLOW";
   }
 
   public evaluateIp(ip: string, fw?: FirewallConfig): "ALLOW" | "DENY" {
     if (!fw) return "ALLOW"; 
-    if (!net.isIPv4(ip) && !net.isIPv6(ip)) return "DENY"; 
+    const normalizedIp = this.normalizeIp(ip);
 
-    if (fw.blocklist_ips && fw.blocklist_ips.includes(ip)) return "DENY";
+    if (!net.isIPv4(normalizedIp) && !net.isIPv6(normalizedIp)) return "DENY"; 
 
-    if (net.isIPv4(ip)) {
+    if (fw.blocklist_ips && fw.blocklist_ips.includes(normalizedIp)) return "DENY";
+
+    if (net.isIPv4(normalizedIp)) {
       for (const range of fw.blocklist_ranges || []) {
-        if (this.matchCidr(ip, range)) return "DENY";
+        if (this.matchCidr(normalizedIp, range)) return "DENY";
       }
     }
 
-    if (fw.allowlist_ips && fw.allowlist_ips.includes(ip)) return "ALLOW";
+    if (fw.allowlist_ips && fw.allowlist_ips.includes(normalizedIp)) return "ALLOW";
 
-    if (net.isIPv4(ip)) {
+    if (net.isIPv4(normalizedIp)) {
       for (const range of fw.allowlist_ranges || []) {
-        if (this.matchCidr(ip, range)) return "ALLOW";
+        if (this.matchCidr(normalizedIp, range)) return "ALLOW";
       }
     }
 

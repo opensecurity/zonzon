@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
 import { getContext, contextStorage } from "./context.js";
+import { setTimeout } from "node:timers/promises";
 
 describe("AsyncLocalStorage Context Boundary", () => {
   it("throws error when accessing context outside of storage run", () => {
@@ -28,13 +29,13 @@ describe("AsyncLocalStorage Context Boundary", () => {
     const contextB = { tenantId: "tenant-B", deviceHash: "hash-B" };
 
     const promiseA = contextStorage.run(contextA, async () => {
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await setTimeout(10);
       const ctx = getContext();
       assert.strictEqual(ctx.tenantId, "tenant-A");
     });
 
     const promiseB = contextStorage.run(contextB, async () => {
-      await new Promise(resolve => setTimeout(resolve, 5));
+      await setTimeout(5);
       const ctx = getContext();
       assert.strictEqual(ctx.tenantId, "tenant-B");
     });

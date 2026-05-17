@@ -137,12 +137,13 @@ describe("SniProxyService - Upstream Port Resolution", { timeout: 5000 }, () => 
 
     await (service as any).handleConnection(clientSocket);
     
-    // Wait for the real net.connect to fire, log to audit, and immediately fail/clean itself up
     await new Promise(resolve => setTimeout(resolve, 50));
     
     assert.ok(httpMock.mock.calls.some(call => 
       call.arguments[5] === "Tunneled to 127.0.0.1:443"
     ), "Did not route to default port 443");
+
+    await service.stop();
   });
 
   it("routes traffic to the configured targetPort within tls_proxy", async () => {
@@ -162,7 +163,7 @@ describe("SniProxyService - Upstream Port Resolution", { timeout: 5000 }, () => 
     const packet = buildClientHello("custom.loop");
 
     const httpMock = mock.method(audit, "http", () => {});
-    mock.method(audit, "error", () => {}); // silence ECONNREFUSED
+    mock.method(audit, "error", () => {}); 
 
     const clientSocket = {
       remoteAddress: "127.0.0.1",
@@ -181,6 +182,8 @@ describe("SniProxyService - Upstream Port Resolution", { timeout: 5000 }, () => 
     assert.ok(httpMock.mock.calls.some(call => 
       call.arguments[5] === "Tunneled to 127.0.0.1:8443"
     ), "Did not route to custom port 8443");
+
+    await service.stop();
   });
 
   it("routes traffic to custom ports via wildcard matches", async () => {
@@ -200,7 +203,7 @@ describe("SniProxyService - Upstream Port Resolution", { timeout: 5000 }, () => 
     const packet = buildClientHello("sub.wild.loop");
 
     const httpMock = mock.method(audit, "http", () => {});
-    mock.method(audit, "error", () => {}); // silence ECONNREFUSED
+    mock.method(audit, "error", () => {}); 
 
     const clientSocket = {
       remoteAddress: "127.0.0.1",
@@ -219,6 +222,8 @@ describe("SniProxyService - Upstream Port Resolution", { timeout: 5000 }, () => 
     assert.ok(httpMock.mock.calls.some(call => 
       call.arguments[5] === "Tunneled to 10.0.0.3:9443"
     ), "Did not route wildcard to custom port 9443");
+
+    await service.stop();
   });
 
   it("aborts connection immediately if domain blocks occur prior to port resolution", async () => {
@@ -265,5 +270,7 @@ describe("SniProxyService - Upstream Port Resolution", { timeout: 5000 }, () => 
       call.arguments[5] && String(call.arguments[5]).startsWith("Tunneled to")
     ), false, "Proxy attempted to tunnel a blocked domain");
     assert.strictEqual(destroyed, true, "Socket was not destroyed after block");
+
+    await service.stop();
   });
 });

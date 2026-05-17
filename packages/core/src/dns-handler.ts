@@ -32,6 +32,8 @@ export class DnsHandler {
   private config: ServerConfig;
 
   private activeTcpConnections = new Map<net.Socket | tls.TLSSocket, { timeoutId?: ReturnType<typeof setTimeout> }>();
+  private upstreamTcpConnections = new Set<net.Socket>();
+  
   private maxTcpConnections: number;
   private tcpIdleTimeoutMs: number;
 
@@ -69,6 +71,11 @@ export class DnsHandler {
   }
 
   async stop(): Promise<void> {
+    if (this.rateLimiter) {
+      this.rateLimiter.destroy();
+      this.rateLimiter = null;
+    }
+
     if (this.udpServer) {
       await new Promise<void>((resolve) => {
         this.udpServer?.close(() => resolve());
@@ -81,7 +88,18 @@ export class DnsHandler {
     }
     this.pendingUpstreamQueries.clear();
 
+    for (const socket of this.upstreamTcpConnections) {
+      if (!socket.destroyed) socket.destroy();
+    }
+    this.upstreamTcpConnections.clear();
+
     if (this.tcpServer) {
+      if ('closeAllConnections' in this.tcpServer) {
+         (this.tcpServer as any).closeAllConnections();
+      }
+      for (const socket of this.activeTcpConnections.keys()) {
+        if (!socket.destroyed) socket.destroy();
+      }
       await new Promise<void>((resolve) => {
         this.tcpServer?.close(() => resolve());
       });
@@ -89,6 +107,12 @@ export class DnsHandler {
     }
 
     if (this.dotServer) {
+      if ('closeAllConnections' in this.dotServer) {
+         (this.dotServer as any).closeAllConnections();
+      }
+      for (const socket of this.activeTcpConnections.keys()) {
+        if (!socket.destroyed) socket.destroy();
+      }
       await new Promise<void>((resolve) => {
         this.dotServer?.close(() => resolve());
       });
@@ -96,8 +120,8 @@ export class DnsHandler {
     }
 
     if (this.dohServer) {
-      if ('closeIdleConnections' in this.dohServer) {
-         (this.dohServer as any).closeIdleConnections();
+      if ('closeAllConnections' in this.dohServer) {
+         (this.dohServer as any).closeAllConnections();
       }
       await new Promise<void>((resolve) => {
         this.dohServer?.close(() => resolve());
@@ -132,6 +156,10 @@ export class DnsHandler {
       udp.on("listening", () => {
         try { udp.setRecvBufferSize(1024 * 1024); } catch {}
         this.udpServer = udp;
+        if (this.port === 0) {
+          const addr = udp.address();
+          this.port = typeof addr === 'object' ? addr.port : 0;
+        }
         resolve();
       });
 
@@ -140,10 +168,11 @@ export class DnsHandler {
   }
 
   private startTcp(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const tcpServer = net.createServer((socket: net.Socket) => {
         if (this.activeTcpConnections.size >= this.maxTcpConnections) {
-          socket.destroy();
+          socket.setTimeout(100, () => socket.destroy());
+          socket.resume();
           return;
         }
 
@@ -157,6 +186,8 @@ export class DnsHandler {
 
         this.handleTcpConnection(socket);
       });
+
+      tcpServer.on("error", reject);
 
       tcpServer.on("listening", () => {
         this.tcpServer = tcpServer;
@@ -168,7 +199,7 @@ export class DnsHandler {
   }
 
   private startDoT(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (!this.config.tls) {
         resolve();
         return;
@@ -180,7 +211,8 @@ export class DnsHandler {
         minVersion: "TLSv1.3"
       }, (socket: tls.TLSSocket) => {
         if (this.activeTcpConnections.size >= this.maxTcpConnections) {
-          socket.destroy();
+          socket.setTimeout(100, () => socket.destroy());
+          socket.resume();
           return;
         }
 
@@ -194,6 +226,8 @@ export class DnsHandler {
 
         this.handleTcpConnection(socket);
       });
+
+      dotServer.on("error", reject);
 
       dotServer.on("listening", () => {
         this.dotServer = dotServer;
@@ -206,7 +240,7 @@ export class DnsHandler {
   }
 
   private startDoH(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (!this.config.tls) {
         resolve();
         return;
@@ -219,11 +253,13 @@ export class DnsHandler {
       }, (req, res) => {
         this.handleDohRequest(req, res).catch(() => {
           if (!res.headersSent) {
-            res.writeHead(500);
+            res.writeHead(500, { "Connection": "close" });
             res.end();
           }
         });
       });
+
+      dohServer.on("error", reject);
 
       dohServer.on("listening", () => {
         this.dohServer = dohServer;
@@ -368,8 +404,9 @@ export class DnsHandler {
   private async handleDohRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const clientIp = req.socket.remoteAddress || "unknown";
     if (this.isRateLimited(clientIp)) {
-      res.writeHead(429);
+      res.writeHead(429, { "Connection": "close" });
       res.end();
+      req.destroy();
       return;
     }
 
@@ -377,8 +414,9 @@ export class DnsHandler {
     const url = new URL(req.url || "/", `https://${req.headers.host || "localhost"}`);
 
     if (url.pathname !== "/dns-query") {
-      res.writeHead(404);
+      res.writeHead(404, { "Connection": "close" });
       res.end();
+      req.destroy();
       return;
     }
 
@@ -387,44 +425,63 @@ export class DnsHandler {
     if (method === "GET") {
       const dnsParam = url.searchParams.get("dns");
       if (!dnsParam) {
-        res.writeHead(400);
+        res.writeHead(400, { "Connection": "close" });
         res.end();
+        req.destroy();
+        return;
+      }
+      if (dnsParam.length > 512) {
+        res.writeHead(413, { "Connection": "close" });
+        res.end();
+        req.destroy();
         return;
       }
       try {
         query = Buffer.from(dnsParam, "base64url");
       } catch {
-        res.writeHead(400);
+        res.writeHead(400, { "Connection": "close" });
         res.end();
+        req.destroy();
         return;
       }
     } else if (method === "POST") {
       if (req.headers["content-type"] !== "application/dns-message") {
-        res.writeHead(415);
+        res.writeHead(415, { "Connection": "close" });
         res.end();
+        req.destroy();
         return;
       }
       const chunks: Buffer[] = [];
       let total = 0;
+      const startTime = Date.now();
       for await (const chunk of req) {
+        if (Date.now() - startTime > 5000) {
+          res.writeHead(408, { "Connection": "close" });
+          res.end();
+          req.destroy();
+          return;
+        }
         total += chunk.length;
         if (total > MAX_TCP_BUFFER_SIZE) {
-          res.writeHead(413);
+          res.writeHead(413, { "Connection": "close" });
           res.end();
+          req.destroy();
           return;
         }
         chunks.push(chunk);
       }
       query = Buffer.concat(chunks);
     } else {
-      res.writeHead(405);
+      res.writeHead(405, { "Connection": "close" });
       res.end();
+      req.destroy();
       return;
     }
 
     if (!query || query.length < 12) {
-      res.writeHead(400);
+      res.writeHead(400, { "Connection": "close" });
       res.end();
+      req.destroy();
       return;
     }
 
@@ -433,12 +490,14 @@ export class DnsHandler {
       res.writeHead(200, {
         "Content-Type": "application/dns-message",
         "Content-Length": response.length,
-        "Cache-Control": "max-age=0"
+        "Cache-Control": "max-age=0",
+        "Connection": "close"
       });
       res.end(response);
     } catch {
-      res.writeHead(502);
+      res.writeHead(502, { "Connection": "close" });
       res.end();
+      req.destroy();
     }
   }
 
@@ -586,64 +645,90 @@ export class DnsHandler {
       dnssecQuery.copy(prefixed, 2);
       fwd.write(prefixed);
     });
+    this.upstreamTcpConnections.add(fwd);
 
     fwd.setTimeout(this.tcpIdleTimeoutMs);
     fwd.on("timeout", () => {
       fwd.destroy();
     });
 
+    let fwdBuffer = Buffer.alloc(0);
+
     fwd.on("data", (data) => {
-      if (data.length < 2) return;
-      const resp = data.subarray(2);
-      
-      if (!DnssecValidator.verifyResponse(resp)) {
-        audit.error(`Dropped upstream TCP response: DNSSEC signature validation failed`);
-        fwd.destroy();
-        return;
-      }
+      fwdBuffer = Buffer.concat([fwdBuffer, data]);
 
-      const responseQuestions = extractQuestions(resp);
-      let valid0x20 = expectedNames.length === responseQuestions.length;
-      for (let i = 0; i < expectedNames.length; i++) {
-        if (responseQuestions[i]?.name !== expectedNames[i]) {
-          valid0x20 = false;
+      while (fwdBuffer.length >= 2) {
+        const length = fwdBuffer.readUInt16BE(0);
+        if (length === 0) {
+          fwd.destroy();
+          return;
+        }
+
+        if (fwdBuffer.length < 2 + length) {
           break;
         }
-      }
 
-      if (!valid0x20) {
-        audit.error(`Dropped upstream TCP response: 0x20 bit encoding mismatch (Spoofing Mitigation)`);
-        fwd.destroy();
-        return;
-      }
+        const respData = fwdBuffer.subarray(0, 2 + length);
+        fwdBuffer = fwdBuffer.subarray(2 + length);
 
-      const ips = this.parseResolvedIpv4s(resp);
-      let blockedIp = null;
-      
-      for (const ip of ips) {
-        if (firewallEngine.evaluateIp(ip, this.config.firewall) === "DENY") {
-          blockedIp = ip;
-          break;
+        const resp = respData.subarray(2);
+        
+        if (!DnssecValidator.verifyResponse(resp)) {
+          audit.error(`Dropped upstream TCP response: DNSSEC signature validation failed`);
+          if (!clientSocket.destroyed) clientSocket.end();
+          fwd.destroy();
+          return;
         }
-      }
 
-      const questions = extractQuestions(query);
-
-      if (blockedIp) {
-        audit.firewall(peerAddr, blockedIp, "DENY", "Upstream target IP blocked");
-        audit.dns(peerAddr, questions, DNS_RCODE.REFUSED, false);
-        if (!clientSocket.destroyed) {
-          const ref = this.server.generateErrorResponse(query, DNS_RCODE.REFUSED);
-          const p = Buffer.alloc(2 + ref.length);
-          p.writeUInt16BE(ref.length, 0);
-          ref.copy(p, 2);
-          clientSocket.write(p);
-          clientSocket.end();
+        const responseQuestions = extractQuestions(resp);
+        let valid0x20 = expectedNames.length === responseQuestions.length;
+        for (let i = 0; i < expectedNames.length; i++) {
+          if (responseQuestions[i]?.name !== expectedNames[i]) {
+            valid0x20 = false;
+            break;
+          }
         }
-      } else {
-        const rcode = resp.length >= 4 ? resp.readUInt16BE(2) & 0xf : 0;
-        audit.dns(peerAddr, questions, rcode, false);
-        if (!clientSocket.destroyed) clientSocket.write(data);
+
+        if (!valid0x20) {
+          audit.error(`Dropped upstream TCP response: 0x20 bit encoding mismatch (Spoofing Mitigation)`);
+          if (!clientSocket.destroyed) clientSocket.end();
+          fwd.destroy();
+          return;
+        }
+
+        const ips = this.parseResolvedIpv4s(resp);
+        let blockedIp = null;
+        
+        for (const ip of ips) {
+          if (firewallEngine.evaluateIp(ip, this.config.firewall) === "DENY") {
+            blockedIp = ip;
+            break;
+          }
+        }
+
+        const questions = extractQuestions(query);
+
+        if (blockedIp) {
+          audit.firewall(peerAddr, blockedIp, "DENY", "Upstream target IP blocked");
+          audit.dns(peerAddr, questions, DNS_RCODE.REFUSED, false);
+          if (!clientSocket.destroyed) {
+            const ref = this.server.generateErrorResponse(query, DNS_RCODE.REFUSED);
+            const p = Buffer.alloc(2 + ref.length);
+            p.writeUInt16BE(ref.length, 0);
+            ref.copy(p, 2);
+            clientSocket.write(p);
+            clientSocket.end();
+          }
+          fwd.destroy();
+        } else {
+          const rcode = resp.length >= 4 ? resp.readUInt16BE(2) & 0xf : 0;
+          audit.dns(peerAddr, questions, rcode, false);
+          if (!clientSocket.destroyed) {
+            clientSocket.write(respData);
+            clientSocket.end();
+          }
+          fwd.destroy();
+        }
       }
     });
 
@@ -660,6 +745,10 @@ export class DnsHandler {
         clientSocket.write(p);
         clientSocket.end();
       }
+    });
+
+    fwd.on("close", () => {
+      this.upstreamTcpConnections.delete(fwd);
     });
   }
 
@@ -689,7 +778,12 @@ export class DnsHandler {
       while (buffer.length >= 2) {
         const length = buffer.readUInt16BE(0);
 
-        if (buffer.length < 2 + length) continue; 
+        if (length === 0) {
+          socket.destroy();
+          return;
+        }
+
+        if (buffer.length < 2 + length) break; 
 
         const query = buffer.subarray(2, 2 + length);
         buffer = buffer.subarray(2 + length);

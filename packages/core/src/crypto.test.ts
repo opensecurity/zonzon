@@ -19,14 +19,13 @@ describe("AEAD Configuration Cryptography", () => {
     assert.strictEqual(decrypted, plaintext);
   });
 
-  it("fails safely returning empty string on forged ciphertext", () => {
+  it("throws an error on forged ciphertext", () => {
     const plaintext = "sensitive-data";
     const ciphertext = encryptSecret(plaintext);
     const parts = ciphertext.split(":");
     parts[3] = "0000000000000000"; 
     const forged = parts.join(":");
     
-    const decrypted = decryptSecret(forged);
-    assert.strictEqual(decrypted, "");
+    assert.throws(() => decryptSecret(forged), /AEAD Decryption Fault/);
   });
 });

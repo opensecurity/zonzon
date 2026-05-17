@@ -15,7 +15,8 @@
       "*.github.com",
       "github.com",
       "*.githubusercontent.com",
-      "*.test.local"
+      "*.test.local",
+      "*.loop"
     ],
     "allowlist_ips": [
       "127.0.0.1"
@@ -53,7 +54,7 @@
         "target": "https://secure.test.local"
       },
       "tls_proxy": {
-        "targetPort": 1234,
+        "targetPort": 1235,
         "targetIp": "172.21.0.100"
       }
     },

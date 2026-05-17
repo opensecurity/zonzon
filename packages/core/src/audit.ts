@@ -17,7 +17,9 @@ export class AuditLogger {
   };
 
   private sanitize(input: any): string {
-    return String(input || "").replace(/[\r\n\t]/g, " ").replace(/[^\x20-\x7E]/g, "?");
+    return String(input || "")
+      .replace(/[\r\n\t]/g, " ")
+      .replace(/[^\x20-\x7E]/g, (char) => "\\x" + char.charCodeAt(0).toString(16).padStart(2, "0"));
   }
 
   private getHumanTime(): string {

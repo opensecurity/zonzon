@@ -5,6 +5,7 @@ import { firewallEngine } from "./firewall.js";
 import { audit } from "./audit.js";
 
 const MAX_CLIENT_HELLO_SIZE = 16384; 
+const MAX_TLS_EXTENSIONS = 50;
 
 export class SniProxyService {
   private port: number;
@@ -45,7 +46,13 @@ export class SniProxyService {
       offset += 2;
       const extensionsEnd = offset + extensionsLength;
 
+      let extCount = 0;
       while (offset < extensionsEnd && offset + 4 <= data.length) {
+        if (extCount++ > MAX_TLS_EXTENSIONS) {
+          audit.error("SNI Parser bounded due to MAX_TLS_EXTENSIONS boundary hit.");
+          return null;
+        }
+
         const extType = data.readUInt16BE(offset);
         const extLength = data.readUInt16BE(offset + 2);
         offset += 4;
@@ -147,7 +154,6 @@ export class SniProxyService {
         if (portConfig && portConfig.tls_proxy && portConfig.tls_proxy.targetIp) {
           targetIps = [portConfig.tls_proxy.targetIp];
         } else if (hostConfig && hostConfig.records) {
-          // Explicitly avoid using the "*" catch-all to resolve internal IPs to prevent proxy loops.
           const internalIps = hostConfig.records
             .filter(r => r.type === "A" || r.type === "AAAA")
             .map(r => (r as any).address);
@@ -246,10 +252,12 @@ export class SniProxyService {
 
   public async stop(): Promise<void> {
     if (this.server) {
-      if ('closeIdleConnections' in this.server) {
-         (this.server as any).closeIdleConnections();
+      if ('closeAllConnections' in this.server) {
+         (this.server as any).closeAllConnections();
       }
-      
+      for (const socket of this.activeConnections) {
+        if (!socket.destroyed) socket.destroy();
+      }
       await new Promise<void>((resolve) => {
         this.server!.close(() => resolve());
       });

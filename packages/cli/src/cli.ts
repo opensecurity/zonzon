@@ -77,9 +77,9 @@ zonzon core engine (v${CLI_VERSION})
 Usage: zonzon <command> [options]
 
 Commands:
-  init        Initialize the default configuration file at ~/.zonzon/config.json
-  start       Boot the routing engine and control plane
-  config      Manage configuration state
+  init       Initialize the default configuration file at ~/.zonzon/config.json
+  start      Boot the routing engine and control plane
+  config     Manage configuration state
 
 Config Commands:
   zonzon config view                   Print the current configuration
@@ -88,8 +88,8 @@ Config Commands:
                                        Example: zonzon config set controlPlane.port 8081
 
 Global Options:
-  --config, -c   Override path to configuration file (default: ~/.zonzon/config.json)
-  --json         Output CLI command results in pure JSON format
+  --config, -c  Override path to configuration file (default: ~/.zonzon/config.json)
+  --json        Output CLI command results in pure JSON format
   `);
   process.exit(0);
 }
@@ -298,7 +298,7 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
     if (shuttingDown) return;
     shuttingDown = true;
     
-    audit.system("SIGINT/SIGTERM received. Initiating graceful connection draining sequence (10s bounds)...");
+    audit.system("Interrupt received. Initiating graceful connection draining sequence (10s bounds)...");
     
     const forceExit = setTimeout(() => {
       audit.error("Graceful drain timeout exceeded. Forcing engine termination.");
@@ -314,6 +314,16 @@ async function startEngine(configPath: string, portOverride?: string, cpPortOver
     audit.system("All boundaries offline. Process terminating cleanly.");
     process.exit(0);
   };
+
+  process.on("uncaughtException", (err) => {
+    audit.error(`Uncaught Exception: ${err.stack || err.message}`);
+    shutdown();
+  });
+
+  process.on("unhandledRejection", (reason: any) => {
+    audit.error(`Unhandled Rejection: ${reason?.stack || reason?.message || reason}`);
+    shutdown();
+  });
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

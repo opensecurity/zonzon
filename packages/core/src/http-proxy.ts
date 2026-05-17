@@ -1,10 +1,12 @@
 import * as net from "node:net";
 import * as dns from "node:dns/promises";
-import { HostConfig, ProxiedRequest, ModifiedHeaders, FirewallConfig, ServerConfig } from "./types.js";
+import { HostConfig, ProxiedRequest, ModifiedHeaders, ServerConfig } from "./types.js";
 import { firewallEngine } from "./firewall.js";
 import { decryptSecret } from "./crypto.js";
 
 export class HttpProxyService {
+  public dnsResolve = dns.resolve;
+
   async resolveHost(hostname: string, config: ServerConfig): Promise<string[]> {
     const normalizedName = hostname.toLowerCase().replace(/\.$/, "");
     
@@ -27,8 +29,8 @@ export class HttpProxyService {
       if (ips.length > 0) return ips;
     }
 
-    const records = await dns.resolve(hostname);
-    return records.filter(ip => typeof ip === "string") as string[];
+    const records = await this.dnsResolve(hostname);
+    return records.filter((ip: unknown) => typeof ip === "string") as string[];
   }
 
   async validateTargetFirewall(targetUrl: string, config: ServerConfig): Promise<string[]> {
@@ -83,23 +85,19 @@ export class HttpProxyService {
       return result;
     }
 
-    for (const [key, value] of Object.entries(originalRequest.headers)) {
-      const lowerKey = key.toLowerCase();
-      if (!["connection", "keep-alive", "te", "transfer-encoding", "upgrade", "proxy-authorization"].includes(lowerKey)) {
-        result.clientResponseHeaders[key] = value;
-      }
-    }
-
     for (const [key, value] of Object.entries(config.http_proxy.headers)) {
       const decryptedValue = decryptSecret(value);
       const sanitized = this.sanitizeHeader(decryptedValue);
       if (sanitized) {
         result.upstreamHeaders[key] = sanitized;
-        result.clientResponseHeaders[key] = sanitized;
       }
     }
 
     result.clientResponseHeaders["X-Proxy"] = "zonzon";
+    result.clientResponseHeaders["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload";
+    result.clientResponseHeaders["X-Content-Type-Options"] = "nosniff";
+    result.clientResponseHeaders["X-Frame-Options"] = "DENY";
+    result.clientResponseHeaders["X-XSS-Protection"] = "1; mode=block";
 
     if (config.http_proxy.forwardRequestBody) {
       if (originalRequest.body) {

@@ -1,3 +1,4 @@
+import { randomBytes, createHash } from "node:crypto";
 import { ServerConfig, DNS_TYPES, DNS_CLASSES, RESPONSE_FLAGS, DNS_RCODE } from "./types.js";
 import { audit } from "./audit.js";
 import { firewallEngine } from "./firewall.js";
@@ -37,6 +38,7 @@ export class DnsWireFormat {
 
   readUint16(): number {
     if (this.offset + 2 > this.buf.length) {
+      audit.error("DnsWireFormat out of bounds read attempt: readUint16");
       this.offset = this.buf.length;
       return 0;
     }
@@ -47,6 +49,7 @@ export class DnsWireFormat {
 
   readUint8(): number {
     if (this.offset + 1 > this.buf.length) {
+      audit.error("DnsWireFormat out of bounds read attempt: readUint8");
       this.offset = this.buf.length;
       return 0;
     }
@@ -64,6 +67,7 @@ export class DnsWireFormat {
 
     while (true) {
       if (currentOffset >= this.buf.length) {
+        audit.error("DnsWireFormat out of bounds read attempt: readDomainName bounds exceeded");
         break;
       }
 
@@ -74,8 +78,14 @@ export class DnsWireFormat {
 
       if ((len & 0xc0) === 0xc0) {
         jumps++;
-        if (jumps > MAX_JUMPS) break;
-        if (currentOffset >= this.buf.length) break;
+        if (jumps > MAX_JUMPS) {
+          audit.error("DnsWireFormat pointer loop detected: readDomainName max jumps exceeded");
+          break;
+        }
+        if (currentOffset >= this.buf.length) {
+          audit.error("DnsWireFormat out of bounds read attempt: readDomainName pointer read");
+          break;
+        }
         
         const ptr = ((len & 0x3f) << 8) | this.buf.readUInt8(currentOffset);
         currentOffset += 1;
@@ -88,6 +98,7 @@ export class DnsWireFormat {
       }
 
       if (len > 63 || currentOffset + len > this.buf.length) {
+        audit.error("DnsWireFormat malformed label length: readDomainName bounds exceeded");
         break;
       }
 
@@ -111,6 +122,7 @@ export class DnsWireFormat {
 
   readUint32(): number {
     if (this.offset + 4 > this.buf.length) {
+      audit.error("DnsWireFormat out of bounds read attempt: readUint32");
       this.offset = this.buf.length;
       return 0;
     }
@@ -273,11 +285,12 @@ export function apply0x20Encoding(originalQuery: Buffer): { query: Buffer, expec
       }
       
       offset++;
+      const entropy = randomBytes(len);
       for (let j = 0; j < len; j++) {
         if (offset + j >= query.length) break;
         let charCode = query[offset + j];
         if ((charCode >= 0x41 && charCode <= 0x5a) || (charCode >= 0x61 && charCode <= 0x7a)) {
-          if (Math.random() > 0.5) charCode |= 0x20;
+          if (entropy[j] % 2 === 0) charCode |= 0x20;
           else charCode &= ~0x20;
           query[offset + j] = charCode;
         }
@@ -428,7 +441,8 @@ export class DevDnsServer {
   }
 
   private generateCacheKey(questions: ParsedQuestion[]): string {
-    return questions.map((q) => `${q.name}:${q.type}`).join("|");
+    const raw = questions.map((q) => `${Buffer.from(q.name).toString("hex")}:${q.type}`).join("|");
+    return createHash("sha256").update(raw).digest("hex");
   }
 
   private evictCacheEntry(): void {

@@ -38,7 +38,7 @@ export class ConfigHandler {
     });
   }
 
-  private verifyProofOfWork(nonce: string): void {
+  private verifyProofOfWork(nonce: string, deviceHash: string, payloadHash: string): void {
     const timeWindow = Math.floor(Date.now() / 300000);
     
     if (this.currentPoWWindow !== timeWindow) {
@@ -50,7 +50,7 @@ export class ConfigHandler {
       throw new Error("Proof of Work challenge nonce already used");
     }
 
-    const challenge = `${this.blindIndexSalt}:${timeWindow}`;
+    const challenge = `${this.blindIndexSalt}:${timeWindow}:${deviceHash}:${payloadHash}`;
     const hash = createHash("sha256").update(challenge + nonce).digest("hex");
     if (!hash.startsWith("0000")) {
       throw new Error("Invalid Proof of Work Challenge");
@@ -59,7 +59,7 @@ export class ConfigHandler {
     this.seenNonces.add(nonce);
   }
 
-  private extractContext(req: http.IncomingMessage, isMutation: boolean): ConfigContext {
+  private extractContext(req: http.IncomingMessage, isMutation: boolean, payloadStr: string): ConfigContext {
     const rawHeaders = {
       "x-api-key": req.headers["x-api-key"],
       "x-device-id": req.headers["x-device-id"],
@@ -103,15 +103,16 @@ export class ConfigHandler {
       throw new Error("Unauthorized Access");
     }
 
+    const deviceSecret = hkdfSync("sha256", this.blindIndexSalt, Buffer.alloc(0), "device_id_derivation", 32);
+    const deviceHash = createHmac("sha256", Buffer.from(deviceSecret)).update(validatedHeaders["x-device-id"]).digest("hex");
+
     if (isMutation) {
       if (!validatedHeaders["x-pow-nonce"]) {
         throw new Error("Mutation endpoint requires x-pow-nonce header");
       }
-      this.verifyProofOfWork(validatedHeaders["x-pow-nonce"]);
+      const payloadHash = createHash("sha256").update(payloadStr).digest("hex");
+      this.verifyProofOfWork(validatedHeaders["x-pow-nonce"], deviceHash, payloadHash);
     }
-
-    const deviceSecret = hkdfSync("sha256", this.blindIndexSalt, Buffer.alloc(0), "device_id_derivation", 32);
-    const deviceHash = createHmac("sha256", Buffer.from(deviceSecret)).update(validatedHeaders["x-device-id"]).digest("hex");
 
     return {
       tenantId: "system-tenant-001",
@@ -143,7 +144,13 @@ export class ConfigHandler {
 
     try {
       const isMutation = method === "PUT" || method === "POST";
-      const context = this.extractContext(req, isMutation);
+      let bodyStr = "";
+      
+      if (isMutation) {
+        bodyStr = await this.readBodyStrict(req);
+      }
+
+      const context = this.extractContext(req, isMutation, bodyStr);
 
       await contextStorage.run(context, async () => {
         if (method === "GET") {
@@ -155,7 +162,6 @@ export class ConfigHandler {
         }
 
         if (method === "PUT") {
-          const bodyStr = await this.readBodyStrict(req);
           const rawConfig = JSON.parse(bodyStr);
           await this.service.updateConfig(rawConfig);
           res.writeHead(200, { "Content-Type": "application/json" });
