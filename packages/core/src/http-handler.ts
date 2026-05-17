@@ -2,6 +2,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as net from "node:net";
+import { randomBytes } from "node:crypto";
 import { DevDnsServer } from "./dns-service.js";
 import { HttpProxyService } from "./http-proxy.js";
 import { HostConfig, ServerConfig } from "./types.js";
@@ -63,6 +64,7 @@ export class HttpHandler {
   private circuitBreakers = new Map<string, ProxyCircuitBreaker>();
   private activeConnections = new Set<net.Socket>();
   private idleTimeoutMs: number;
+  private readonly loopSecret = randomBytes(16).toString("hex");
 
   private readonly fingerprintHeadersToScrub = [
     // core servers & infrastructure proxies
@@ -244,6 +246,8 @@ export class HttpHandler {
       outReqHeaders[k] = v;
     }
 
+    outReqHeaders["x-zonzon-loop"] = this.loopSecret;
+
     const reqOptions: http.RequestOptions | https.RequestOptions = {
       hostname: targetIp,
       port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
@@ -367,6 +371,13 @@ export class HttpHandler {
     const clientIp = req.socket.remoteAddress || "unknown";
     const reqMethod = req.method || "GET";
     const reqUrl = req.url || "/";
+
+    if (req.headers["x-zonzon-loop"] === this.loopSecret) {
+      audit.http(clientIp, reqMethod, req.headers.host || "UNKNOWN", reqUrl, 508, "Routing Loop Detected");
+      res.writeHead(508, { "Content-Type": "text/html", "Connection": "close" });
+      res.end("<h1>508 Loop Detected</h1>");
+      return;
+    }
 
     if (reqUrl.startsWith("http://")) {
       return this.handleForwardProxy(req, res);

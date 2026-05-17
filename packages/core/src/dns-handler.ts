@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as tls from "node:tls";
 import * as https from "node:https";
 import * as http from "node:http";
+import * as fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { DevDnsServer, DnsWireFormat, extractQuestions, apply0x20Encoding, appendEdns0DoBit } from "./dns-service.js";
 import { DnssecValidator } from "./dnssec.js";
@@ -107,6 +108,13 @@ export class DnsHandler {
     this.activeTcpConnections.clear();
   }
 
+  private resolveTlsMaterial(data: string): string | Buffer {
+    if (data.includes("-----BEGIN")) {
+      return data;
+    }
+    return fs.readFileSync(data);
+  }
+
   private startUdp(): Promise<void> {
     return new Promise((resolve, reject) => {
       const udp = dgram.createSocket("udp4");
@@ -167,8 +175,8 @@ export class DnsHandler {
       }
 
       const dotServer = tls.createServer({
-        cert: this.config.tls.cert,
-        key: this.config.tls.key,
+        cert: this.resolveTlsMaterial(this.config.tls.cert),
+        key: this.resolveTlsMaterial(this.config.tls.key),
         minVersion: "TLSv1.3"
       }, (socket: tls.TLSSocket) => {
         if (this.activeTcpConnections.size >= this.maxTcpConnections) {
@@ -205,8 +213,8 @@ export class DnsHandler {
       }
 
       const dohServer = https.createServer({
-        cert: this.config.tls.cert,
-        key: this.config.tls.key,
+        cert: this.resolveTlsMaterial(this.config.tls.cert),
+        key: this.resolveTlsMaterial(this.config.tls.key),
         minVersion: "TLSv1.3"
       }, (req, res) => {
         this.handleDohRequest(req, res).catch(() => {
